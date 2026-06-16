@@ -6,17 +6,65 @@ services:
     command: bun run src/cmd/server/main.ts
     ports:
       - "${APP_PORT:-3001}:${APP_PORT:-3001}"
-    env_file:
-      - ../.env
     environment:
-      APP_ENV: ${APP_ENV:-production}
+      # App
+      APP_NAME: ${APP_NAME:-sheka}
       APP_PORT: ${APP_PORT:-3001}
+      APP_ENV: ${APP_ENV:-production}
+      MIN_CONFIDENCE: ${MIN_CONFIDENCE:-medium}
+      BASE_URL: ${BASE_URL:-http://localhost:3001}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # CORS
+      CORS_ENABLED: ${CORS_ENABLED:-true}
+      CORS_ALLOW_CREDENTIALS: ${CORS_ALLOW_CREDENTIALS:-true}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      CORS_ALLOWED_HEADERS: ${CORS_ALLOWED_HEADERS:-}
+      CORS_ALLOWED_METHODS: ${CORS_ALLOWED_METHODS:-}
+      CORS_MAX_AGE_SECONDS: ${CORS_MAX_AGE_SECONDS:-300}
+      # OpenRouter (LLM)
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-6}
+      # Sui
+      SUI_RPC_URL: ${SUI_RPC_URL:-https://fullnode.testnet.sui.io:443}
+      SUI_NETWORK: ${SUI_NETWORK:-testnet}
+      # DUSDC
+      DUSDC_TYPE: ${DUSDC_TYPE:-}
+      DUSDC_CURRENCY_ID: ${DUSDC_CURRENCY_ID:-}
+      DUSDC_DECIMALS: ${DUSDC_DECIMALS:-6}
+      # Sheka market contract
+      SHEKA_MARKET_PACKAGE_ID: ${SHEKA_MARKET_PACKAGE_ID:-}
+      SHEKA_MARKET_ADMIN_CAP_ID: ${SHEKA_MARKET_ADMIN_CAP_ID:-}
+      SHEKA_MARKET_ADMIN_ADDRESS: ${SHEKA_MARKET_ADMIN_ADDRESS:-}
+      SHEKA_MARKET_AUTO_CREATE_LIMIT: ${SHEKA_MARKET_AUTO_CREATE_LIMIT:-8}
+      # Sheka analysis contract
+      SHEKA_ANALYSIS_PACKAGE_ID: ${SHEKA_ANALYSIS_PACKAGE_ID:-}
+      SHEKA_ANALYSIS_REGISTRY_ID: ${SHEKA_ANALYSIS_REGISTRY_ID:-}
+      SHEKA_ANALYSIS_TREASURY_ID: ${SHEKA_ANALYSIS_TREASURY_ID:-}
+      SHEKA_ANALYSIS_QUOTA_ID: ${SHEKA_ANALYSIS_QUOTA_ID:-}
+      SHEKA_ANALYSIS_ADMIN_CAP_ID: ${SHEKA_ANALYSIS_ADMIN_CAP_ID:-}
+      SHEKA_ANALYSIS_AUTO_MODEL_ID: ${SHEKA_ANALYSIS_AUTO_MODEL_ID:-0}
+      SHEKA_ANALYSIS_FREE_LIMIT: ${SHEKA_ANALYSIS_FREE_LIMIT:-3}
+      # ESPN data service
+      ESPN_API_BASE_URL: ${ESPN_API_BASE_URL:-}
+      ESPN_API_KEY: ${ESPN_API_KEY:-}
+      INGEST_LEAGUES: ${INGEST_LEAGUES:-basketball:nba,football:nfl,soccer:fifa.world}
+      # Walrus (HTTP publisher + aggregator; no CLI)
+      WALRUS_PUBLISHER_URL: ${WALRUS_PUBLISHER_URL:-https://publisher.walrus-testnet.walrus.space}
+      WALRUS_GATEWAY_URL: ${WALRUS_GATEWAY_URL:-https://aggregator.walrus-testnet.walrus.space/v1}
+      WALRUS_EPOCHS: ${WALRUS_EPOCHS:-5}
+      # Postgres (points at the db service from service.yml)
       DB_POSTGRES_HOST: ${DB_POSTGRES_HOST:-db}
       DB_POSTGRES_PORT: ${DB_POSTGRES_PORT:-5432}
       DB_POSTGRES_NAME: ${DB_POSTGRES_NAME:-sheka}
       DB_POSTGRES_USER: ${DB_POSTGRES_USER:-postgres}
       DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-postgres}
       DB_POSTGRES_SSL_MODE: ${DB_POSTGRES_SSL_MODE:-disable}
+      # OpenTelemetry (off by default; set OTEL_ENABLED=true + OTEL_ENDPOINT to export)
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_PROTOCOL: ${OTEL_PROTOCOL:-grpc}
+      OTEL_ENDPOINT: ${OTEL_ENDPOINT:-}
     volumes:
+      # Read-only Sui keystore for admin signing (optional; read API works without it).
       - ${HOME}/.sui:/home/bun/.sui:ro
     restart: unless-stopped
