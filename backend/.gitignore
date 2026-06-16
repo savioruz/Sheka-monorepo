@@ -1,0 +1,11 @@
+# deps
+node_modules/
+
+# env
+.env
+
+# drizzle
+/drizzle
+
+# superpowers
+.superpowers/

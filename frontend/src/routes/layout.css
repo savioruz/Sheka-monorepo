@@ -1,0 +1,103 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn-svelte/tailwind.css';
+@import '@fontsource-variable/inter';
+@import '@fontsource/roboto-mono/400.css';
+@import '@fontsource/roboto-mono/500.css';
+@import '@fontsource/roboto-mono/700.css';
+
+:root {
+	--background: #ffffff;
+	--foreground: #1a2b3c;
+	--card: #ffffff;
+	--card-foreground: #1a2b3c;
+	--popover: #ffffff;
+	--popover-foreground: #1a2b3c;
+	--primary: #29b5e8;
+	--primary-foreground: #ffffff;
+	--primary-hover: #1e9bcb;
+	--primary-deep: #11567f;
+	--primary-subtle: #e5f6fc;
+	--secondary: #f5f8fa;
+	--secondary-foreground: #1a2b3c;
+	--muted: #f5f8fa;
+	--muted-foreground: #5b6b7b;
+	--accent: #e5f6fc;
+	--accent-foreground: #11567f;
+	--destructive: #d6402c;
+	--destructive-foreground: #ffffff;
+	--border: #d5dee5;
+	--input: #e8eef2;
+	--ring: #29b5e8;
+
+	--surface-1: #f5f8fa;
+	--surface-2: #e8eef2;
+	--border-subtle: #e8eef2;
+	--ink: #1a2b3c;
+	--ink-muted: #5b6b7b;
+	--ink-subdued: #8a98a6;
+	--mono-ink: #11567f;
+	--success: #1e8e5a;
+	--warning: #c77700;
+	--error: #d6402c;
+
+	--radius: 0.625rem;
+	--radius-sm: 4px;
+	--radius-md: 6px;
+	--radius-lg: 10px;
+}
+
+@theme inline {
+	--font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+	--font-mono: 'Roboto Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-primary-hover: var(--primary-hover);
+	--color-primary-deep: var(--primary-deep);
+	--color-primary-subtle: var(--primary-subtle);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+
+	--color-surface-1: var(--surface-1);
+	--color-surface-2: var(--surface-2);
+	--color-border-subtle: var(--border-subtle);
+	--color-ink: var(--ink);
+	--color-ink-muted: var(--ink-muted);
+	--color-ink-subdued: var(--ink-subdued);
+	--color-mono-ink: var(--mono-ink);
+	--color-success: var(--success);
+	--color-warning: var(--warning);
+	--color-error: var(--error);
+
+	--radius-sm: var(--radius-sm);
+	--radius-md: var(--radius-md);
+	--radius-lg: var(--radius-lg);
+}
+
+@layer base {
+	* {
+		@apply border-border outline-ring/50;
+	}
+	body {
+		@apply bg-background text-foreground antialiased;
+	}
+	html {
+		@apply font-sans;
+	}
+}

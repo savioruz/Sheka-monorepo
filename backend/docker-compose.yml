@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_POSTGRES_NAME:-sheka}
+      POSTGRES_USER: ${DB_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${DB_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: bun run src/cmd/server/main.ts
+    ports:
+      - "${APP_PORT:-3001}:${APP_PORT:-3001}"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_PORT: ${APP_PORT:-3001}
+      DB_POSTGRES_HOST: db
+      DB_POSTGRES_PORT: 5432
+      DB_POSTGRES_NAME: ${DB_POSTGRES_NAME:-sheka}
+      DB_POSTGRES_USER: ${DB_POSTGRES_USER:-postgres}
+      DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-postgres}
+      DB_POSTGRES_SSL_MODE: disable
+    volumes:
+      - ${HOME}/.sui:/home/bun/.sui:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

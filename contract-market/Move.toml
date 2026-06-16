@@ -1,0 +1,8 @@
+[package]
+name = "sheka_market"
+edition = "2024.beta"
+
+[dependencies]
+
+[addresses]
+sheka_market = "0x0"

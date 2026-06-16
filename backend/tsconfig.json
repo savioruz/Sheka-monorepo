@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "hono/jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@config/*": ["./src/config/*"],
+      "@infras/*": ["./src/infras/*"],
+      "@domains/*": ["./src/domains/*"],
+      "@db/*": ["./src/db/*"],
+      "@auth/*": ["./src/auth/*"],
+      "@middleware/*": ["./src/middleware/*"],
+      "@transport/*": ["./src/transport/*"]
+    }
+  },
+  "include": ["src/**/*", "scripts/**/*", "drizzle.config.ts"],
+  "exclude": ["node_modules", "drizzle"]
+}

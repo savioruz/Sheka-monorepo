@@ -1,0 +1,8 @@
+[package]
+name = "sheka_analysis"
+edition = "2024.beta"
+
+[dependencies]
+
+[addresses]
+sheka_analysis = "0x0"
