@@ -37,7 +37,7 @@ export function createServer(deps: ServerDeps): Hono {
   const { config, logger, otel, db, ingestor, analyst, marketService, analysisService } = deps;
 
   const nonceManager = createNonceManager({ db });
-  const verifier = createVerifier({ db, nonceManager });
+  const verifier = createVerifier({ db, nonceManager, suiRpcUrl: config.sui.rpcUrl });
   const authMiddleware = createAuthMiddleware({ verifier });
 
   const app = new Hono();
