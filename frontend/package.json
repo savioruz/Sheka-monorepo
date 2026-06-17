@@ -57,6 +57,7 @@
 	},
 	"dependencies": {
 		"@fontsource/roboto-mono": "^5.2.9",
+		"@mysten/enoki": "^1.1.0",
 		"@mysten/seal": "0.9.6",
 		"@mysten/sui": "^1.21.2",
 		"@mysten/wallet-standard": "^0.20.3",

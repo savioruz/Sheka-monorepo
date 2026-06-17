@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Database } from '@db/index';
 import { nonces } from '@db/schema/nonces';
+import { SuiClient } from '@mysten/sui/client';
 import { verifyPersonalMessageSignature } from '@mysten/sui/verify';
 import { and, eq, gt } from 'drizzle-orm';
 import type { NonceManager } from './nonce';
@@ -8,10 +9,15 @@ import type { NonceManager } from './nonce';
 export interface VerifyDeps {
   db: Database;
   nonceManager: NonceManager;
+  /** Sui RPC URL — needed to verify zkLogin signatures (proof checked vs epoch). */
+  suiRpcUrl: string;
 }
 
 export function createVerifier(deps: VerifyDeps) {
-  const { db, nonceManager } = deps;
+  const { db, nonceManager, suiRpcUrl } = deps;
+  // Used only when verifying zkLogin (Enoki/Google) signatures; ed25519/secp/
+  // multisig wallet signatures verify offline and ignore it.
+  const client = new SuiClient({ url: suiRpcUrl });
 
   async function verifyWalletSignature(
     address: string,
@@ -25,6 +31,7 @@ export function createVerifier(deps: VerifyDeps) {
       const result = await verifyPersonalMessageSignature(
         new TextEncoder().encode(nonce),
         signature,
+        { client, address },
       );
       return result.toSuiAddress().toLowerCase() === address.toLowerCase();
     } catch {

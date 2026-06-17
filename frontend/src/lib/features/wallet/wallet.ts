@@ -55,8 +55,16 @@ export async function connectWallet(preferredName?: string): Promise<ConnectedWa
 	return cachedWallet;
 }
 
-export function disconnectWallet() {
+export async function disconnectWallet(): Promise<void> {
+	const w = cachedWallet?.wallet;
 	cachedWallet = null;
+	try {
+		// Actually disconnect (Enoki zkLogin → logout()/clear session) so the next
+		// connect can pick a different account; extension wallets re-authorize.
+		await w?.features['standard:disconnect']?.disconnect();
+	} catch {
+		/* ignore */
+	}
 }
 
 /**
@@ -90,7 +98,8 @@ export async function signPersonalMessage(message: string): Promise<string> {
 
 	const { signPersonalMessage: sign } = wallet.features[SuiSignPersonalMessage];
 	const bytes = new TextEncoder().encode(message);
-	const result = await sign({ message: bytes, account });
+	// `chain` is required by the Enoki (zkLogin) wallet to pick its session/client.
+	const result = await sign({ message: bytes, account, chain: appChain() });
 	return result.signature;
 }
 
@@ -102,7 +111,7 @@ export async function signPersonalMessageBytes(message: Uint8Array): Promise<str
 	}
 	const { wallet, account } = cachedWallet;
 	const { signPersonalMessage: sign } = wallet.features[SuiSignPersonalMessage];
-	const result = await sign({ message, account });
+	const result = await sign({ message, account, chain: appChain() });
 	return result.signature;
 }
 
