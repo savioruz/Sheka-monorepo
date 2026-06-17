@@ -1,5 +1,10 @@
 node_modules
 
+# This project uses bun (bun.lock). Don't track npm/pnpm/yarn lockfiles.
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
 # Output
 .output
 .vercel
