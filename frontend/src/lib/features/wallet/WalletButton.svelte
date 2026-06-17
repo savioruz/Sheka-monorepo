@@ -14,17 +14,14 @@
 	import type { WalletWithSuiFeatures } from '@mysten/wallet-standard';
 	import { Wallet as WalletIcon } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
+	import { getAuthStore } from './auth';
 
 	const STORAGE_KEY = 'sheka_auth';
 
-	let {
-		address = $bindable<string | null>(null),
-		// eslint-disable-next-line no-useless-assignment
-		sessionToken = $bindable<string | null>(null)
-	} = $props<{
-		address?: string | null;
-		sessionToken?: string | null;
-	}>();
+	// Shared wallet/session state (set in +layout.svelte) so every route's navbar
+	// and pages observe the same connection.
+	const auth = getAuthStore();
+	const address = $derived($auth.address);
 
 	let isConnecting = $state(false);
 	let pickerOpen = $state(false);
@@ -48,24 +45,22 @@
 			const { nonce } = await getNonce(selectedAddress);
 			const signature = await signPersonalMessage(nonce);
 
-			const auth = await verifyAuth({ address: selectedAddress, nonce, signature });
+			const verified = await verifyAuth({ address: selectedAddress, nonce, signature });
 
-			address = auth.wallet_address;
-			sessionToken = auth.session_token;
+			auth.set({ address: verified.wallet_address, sessionToken: verified.session_token });
 			// Persist so a reload can restore the session + silently reconnect.
 			localStorage.setItem(
 				STORAGE_KEY,
 				JSON.stringify({
-					token: auth.session_token,
-					address: auth.wallet_address,
+					token: verified.session_token,
+					address: verified.wallet_address,
 					walletName: connected.wallet.name,
-					expiresAt: auth.expires_at
+					expiresAt: verified.expires_at
 				})
 			);
-			toast.success('Signed in', { description: truncate(auth.wallet_address) });
+			toast.success('Signed in', { description: truncate(verified.wallet_address) });
 		} catch (err) {
-			address = null;
-			sessionToken = null;
+			auth.set({ address: null, sessionToken: null });
 			toast.error('Sign-in failed', {
 				description: err instanceof Error ? err.message : 'Connection failed'
 			});
@@ -86,8 +81,7 @@
 
 	async function disconnect() {
 		await disconnectWallet();
-		address = null;
-		sessionToken = null;
+		auth.set({ address: null, sessionToken: null });
 		localStorage.removeItem(STORAGE_KEY);
 	}
 
@@ -110,8 +104,7 @@
 		}
 		const reconnected = await silentReconnect(saved.walletName);
 		if (reconnected && reconnected.account.address === saved.address) {
-			address = saved.address;
-			sessionToken = saved.token;
+			auth.set({ address: saved.address, sessionToken: saved.token });
 		} else {
 			localStorage.removeItem(STORAGE_KEY);
 		}

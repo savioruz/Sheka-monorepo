@@ -168,6 +168,7 @@ export interface UserPosition {
 }
 
 export interface NewsArticle {
+	id: number | null;
 	headline: string;
 	description: string;
 	published: string | null;

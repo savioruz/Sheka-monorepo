@@ -26,24 +26,16 @@
 	import { suiClient, formatBalance } from '$lib/sui';
 	import { signTransaction } from '$lib/features/wallet';
 	import { Button } from '$lib/components/ui/button';
-	import * as Tabs from '$lib/components/ui/tabs';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import { Badge } from '$lib/components/ui/badge';
-	import { ChevronsUpDown } from '@lucide/svelte';
+	import { Separator } from '$lib/components/ui/separator';
+	import { ChevronsUpDown, ChevronDown, Sparkles } from '@lucide/svelte';
 	import { leagueLabel, sportEmoji, titleCaseSport } from '$lib/utils';
-	import { Sparkles } from '@lucide/svelte';
+	import { SPORT_CATEGORIES } from '$lib/categories';
 	import { toast } from 'svelte-sonner';
 
 	const SOON_HOURS = Number(import.meta.env.VITE_STARTING_SOON_HOURS ?? 3);
 	const WINDOW_DAYS = Number(import.meta.env.VITE_UPCOMING_WINDOW_DAYS ?? 7);
 	const LIVE_MAX_HOURS = Number(import.meta.env.VITE_LIVE_MAX_HOURS ?? 4);
-	const TAB_ORDER: MarketTab[] = ['live', 'starting_soon', 'upcoming', 'resolved'];
-	const TAB_LABEL: Record<string, string> = {
-		live: 'Live',
-		starting_soon: 'Starting Soon',
-		upcoming: 'Upcoming',
-		resolved: 'Resolved'
-	};
 
 	let {
 		walletAddress = $bindable<string | null>(null),
@@ -71,15 +63,13 @@
 	let decrypting = $state<string | null>(null);
 	let expandedReason = $state<Record<string, boolean>>({});
 
-	// Browsing state: a clock (kept fresh for countdowns + tab transitions), the
-	// active state-tab (null = auto-pick the first non-empty), and the sport pill.
+	// Browsing state: a clock kept fresh for countdowns + bucket transitions, plus
+	// the sidebar filters (event category + sport + league).
 	let now = $state(Date.now());
-	let activeTab = $state<MarketTab | null>(null);
 	let sportFilter = $state<string>('all');
+	let leagueFilter = $state<string | null>(null);
 
-	const sports = $derived([...new Set(markets.map((m) => m.sport))].sort());
-
-	// Bucket markets into tabs (after the sport filter), recomputed as `now` ticks.
+	// Bucket markets by state (after the sport/league filters), recomputed as `now` ticks.
 	const byTab = $derived.by(() => {
 		const g: Record<MarketTab, Market[]> = {
 			live: [],
@@ -90,31 +80,29 @@
 		};
 		for (const m of markets) {
 			if (sportFilter !== 'all' && m.sport !== sportFilter) continue;
+			if (leagueFilter && m.league !== leagueFilter) continue;
 			g[marketTab(m, now, SOON_HOURS, WINDOW_DAYS)].push(m);
 		}
 		return g;
 	});
 
-	const currentTab = $derived(
-		activeTab ?? TAB_ORDER.find((t) => byTab[t].length > 0) ?? 'upcoming'
-	);
-
 	function ts(m: Market): number {
 		const t = m.scheduled_at ? new Date(m.scheduled_at).getTime() : NaN;
 		return Number.isNaN(t) ? 8.64e15 : t; // undated sort last
 	}
+	const byTime = (a: Market, b: Market) => ts(a) - ts(b);
 
-	const shown = $derived.by(() => {
-		const list = byTab[currentTab].slice();
-		list.sort((a, b) => (currentTab === 'resolved' ? ts(b) - ts(a) : ts(a) - ts(b)));
-		return list;
-	});
+	// Live + Starting Soon form one category; Upcoming and Resolved follow.
+	const live = $derived(byTab.live.slice().sort(byTime));
+	const soon = $derived(byTab.starting_soon.slice().sort(byTime));
+	const upcoming = $derived(byTab.upcoming.slice().sort(byTime));
+	const resolved = $derived(byTab.resolved.slice().sort((a, b) => ts(b) - ts(a)));
+	const totalShown = $derived(live.length + soon.length + upcoming.length + resolved.length);
 
-	// Upcoming is grouped by day (undated "Scheduled" group last); other tabs flat.
+	// Upcoming grouped by day (undated "Scheduled" group last).
 	const dayGroups = $derived.by(() => {
-		if (currentTab !== 'upcoming') return null;
 		const groups: Record<string, { label: string; items: Market[] }> = {};
-		for (const m of shown) {
+		for (const m of upcoming) {
 			const key = marketDayKey(m);
 			(groups[key] ??= { label: formatDayLabel(m), items: [] }).items.push(m);
 		}
@@ -122,6 +110,69 @@
 			.sort((a, b) => (a[0] === 'scheduled' ? 1 : b[0] === 'scheduled' ? -1 : a[0] < b[0] ? -1 : 1))
 			.map((e) => e[1]);
 	});
+
+	// Top-level categories (Live bundles Live + Starting Soon), selected via a
+	// plain text switcher. Defaults to the first non-empty category.
+	type Cat = 'live' | 'upcoming' | 'resolved';
+	const categories = $derived([
+		{ key: 'live', label: 'Live', count: live.length + soon.length },
+		{ key: 'upcoming', label: 'Upcoming', count: upcoming.length },
+		{ key: 'resolved', label: 'Resolved', count: resolved.length }
+	] as { key: Cat; label: string; count: number }[]);
+	let category = $state<Cat | null>(null);
+	const currentCategory = $derived(category ?? categories.find((c) => c.count > 0)?.key ?? 'live');
+	const currentCount = $derived(categories.find((c) => c.key === currentCategory)?.count ?? 0);
+
+	// Which event category a market belongs to (Live bundles live + starting_soon).
+	function eventOf(m: Market): Cat | null {
+		const t = marketTab(m, now, SOON_HOURS, WINDOW_DAYS);
+		if (t === 'live' || t === 'starting_soon') return 'live';
+		if (t === 'upcoming') return 'upcoming';
+		if (t === 'resolved') return 'resolved';
+		return null; // hidden
+	}
+
+	// Market counts per sport/league within the current event category (ignores the
+	// sport/league filter, so the sidebar tree shows what's available to switch to).
+	const sportCounts = $derived.by(() => {
+		const bySport: Record<string, number> = {};
+		const byLeague: Record<string, number> = {};
+		for (const m of markets) {
+			if (eventOf(m) !== currentCategory) continue;
+			bySport[m.sport] = (bySport[m.sport] ?? 0) + 1;
+			byLeague[m.league] = (byLeague[m.league] ?? 0) + 1;
+		}
+		return { bySport, byLeague };
+	});
+
+	// Sidebar sport filter selection.
+	const allSports = $derived(sportFilter === 'all' && !leagueFilter);
+	function selectSport(sport: string) {
+		sportFilter = sport;
+		leagueFilter = null;
+	}
+	function selectLeague(sport: string, slug: string) {
+		sportFilter = sport;
+		leagueFilter = slug;
+	}
+	function clearSport() {
+		sportFilter = 'all';
+		leagueFilter = null;
+	}
+
+	// Label for the mobile sport dropdown trigger.
+	const currentSportLabel = $derived.by(() => {
+		if (leagueFilter) return `${sportEmoji(sportFilter)} ${leagueLabel(leagueFilter)}`;
+		if (sportFilter !== 'all') return `${sportEmoji(sportFilter)} ${titleCaseSport(sportFilter)}`;
+		return 'All sports';
+	});
+
+	// Desktop tree: which sport <details> is expanded (single-open).
+	let openSport = $state<string | null>(null);
+	function toggleSport(e: Event, sport: string) {
+		e.preventDefault();
+		openSport = openSport === sport ? null : sport;
+	}
 
 	async function load() {
 		try {
@@ -328,6 +379,10 @@
 						<img
 							src={m.home_logo}
 							alt=""
+							width="16"
+							height="16"
+							loading="lazy"
+							decoding="async"
 							class="h-4 w-4 shrink-0 object-contain"
 							onerror={hideImg}
 						/>
@@ -338,6 +393,10 @@
 						<img
 							src={m.away_logo}
 							alt=""
+							width="16"
+							height="16"
+							loading="lazy"
+							decoding="async"
 							class="h-4 w-4 shrink-0 object-contain"
 							onerror={hideImg}
 						/>
@@ -374,9 +433,27 @@
 				>
 					<p class="flex items-center justify-center gap-1 text-[11px] text-ink-muted">
 						{#if o === 0 && m.home_logo}
-							<img src={m.home_logo} alt="" class="h-3.5 w-3.5 object-contain" onerror={hideImg} />
+							<img
+								src={m.home_logo}
+								alt=""
+								width="14"
+								height="14"
+								loading="lazy"
+								decoding="async"
+								class="h-3.5 w-3.5 object-contain"
+								onerror={hideImg}
+							/>
 						{:else if o === 2 && m.away_logo}
-							<img src={m.away_logo} alt="" class="h-3.5 w-3.5 object-contain" onerror={hideImg} />
+							<img
+								src={m.away_logo}
+								alt=""
+								width="14"
+								height="14"
+								loading="lazy"
+								decoding="async"
+								class="h-3.5 w-3.5 object-contain"
+								onerror={hideImg}
+							/>
 						{/if}
 						<span class="truncate">{o === 0 ? m.home : o === 2 ? m.away : 'Draw'}</span>
 					</p>
@@ -488,6 +565,7 @@
 			<div class="relative z-10 mt-3 space-y-1 pt-2">
 				{#each myPos as p (p.id)}
 					{@const pv = positionValue(p.amount, p.outcome, m.pools, m.total)}
+					{@const won = m.winner !== null && p.outcome === m.winner}
 					<div class="flex items-center justify-between gap-2 text-xs">
 						<span class="min-w-0 truncate text-ink-muted">
 							{fmt(p.amount)} on {OUTCOME_LABEL[p.outcome]}
@@ -496,10 +574,20 @@
 								<span class={pv.pnl >= 0 ? 'text-success' : 'text-error'}>
 									({pv.pnl >= 0 ? '+' : ''}{(pv.roi * 100).toFixed(0)}%)
 								</span>
+							{:else if won}
+								· won <span class="font-medium text-success">{fmt(pv.payout)}</span>
+							{:else}
+								· <span class="text-error">lost</span>
 							{/if}
 						</span>
 						{#if resolved}
-							<Button size="sm" class="shrink-0" onclick={() => onClaim(m, p)}>Claim</Button>
+							{#if won}
+								<Button size="sm" class="shrink-0" onclick={() => onClaim(m, p)}>Claim</Button>
+							{:else}
+								<Button size="sm" variant="ghost" class="shrink-0 text-ink-subdued" disabled>
+									Lost
+								</Button>
+							{/if}
 						{/if}
 					</div>
 				{/each}
@@ -508,72 +596,56 @@
 	</div>
 {/snippet}
 
-<section class="p-5">
-	<div class="mb-3 flex items-center justify-between">
-		<h2 class="text-base font-semibold text-ink">Prediction Markets</h2>
-		<span class="text-xs text-ink-subdued"
-			>{shown.length} {TAB_LABEL[currentTab].toLowerCase()}</span
-		>
+{#snippet sectionHead(label: string, count: number, isLive = false)}
+	<div class="mb-2 flex items-center gap-2">
+		{#if isLive}
+			<span class="h-2 w-2 animate-pulse rounded-full bg-error"></span>
+		{/if}
+		<h3 class="text-sm font-semibold text-ink">{label}</h3>
+		<span class="text-xs text-ink-subdued">{count}</span>
 	</div>
+{/snippet}
 
-	<!-- State tabs (shadcn-svelte Tabs + Badge counts) -->
-	<Tabs.Root
-		value={currentTab}
-		onValueChange={(v) => (activeTab = v as MarketTab)}
-		class="mb-3 w-full"
-	>
-		<Tabs.List class="w-full justify-start overflow-x-auto">
-			{#each TAB_ORDER as t (t)}
-				<Tabs.Trigger value={t} class="gap-1.5">
-					{TAB_LABEL[t]}
-					<Badge variant="secondary" class="px-1.5 py-0 text-[10px]">{byTab[t].length}</Badge>
-				</Tabs.Trigger>
-			{/each}
-		</Tabs.List>
-	</Tabs.Root>
-
-	<!-- Sport filter pills (only when >1 sport present) -->
-	{#if sports.length > 1}
-		<div class="mb-4 flex flex-wrap gap-2">
-			<Button
-				size="sm"
-				variant={sportFilter === 'all' ? 'default' : 'outline'}
-				class="h-7"
-				onclick={() => (sportFilter = 'all')}
-			>
-				All
-			</Button>
-			{#each sports as s (s)}
-				<Button
-					size="sm"
-					variant={sportFilter === s ? 'default' : 'outline'}
-					class="h-7"
-					onclick={() => (sportFilter = s)}
-				>
-					{sportEmoji(s)}
-					{titleCaseSport(s)}
-				</Button>
-			{/each}
-		</div>
-	{/if}
-
+{#snippet content()}
 	{#if loading && markets.length === 0}
 		<div class="space-y-3">
 			{#each [1, 2] as _i (_i)}
 				<div class="h-28 animate-pulse border border-border bg-muted"></div>
 			{/each}
 		</div>
-	{:else if shown.length === 0}
-		<p class="py-8 text-center text-sm text-ink-muted">
-			No {TAB_LABEL[currentTab].toLowerCase()} markets
-		</p>
-	{:else if dayGroups}
+	{:else if currentCount === 0}
+		<p class="py-8 text-center text-sm text-ink-muted">No markets in this category</p>
+	{:else if currentCategory === 'live'}
+		<!-- Live bundles Live + Starting Soon -->
+		<div class="space-y-5">
+			{#if live.length}
+				<div>
+					{@render sectionHead('Live', live.length, true)}
+					<div class="space-y-3">
+						{#each live as m (m.market_object_id)}
+							{@render marketCard(m)}
+						{/each}
+					</div>
+				</div>
+			{/if}
+			{#if soon.length}
+				<div>
+					{@render sectionHead('Starting Soon', soon.length)}
+					<div class="space-y-3">
+						{#each soon as m (m.market_object_id)}
+							{@render marketCard(m)}
+						{/each}
+					</div>
+				</div>
+			{/if}
+		</div>
+	{:else if currentCategory === 'upcoming'}
 		<div class="space-y-5">
 			{#each dayGroups as group (group.label)}
 				<div>
-					<h3 class="mb-2 text-xs font-semibold tracking-wide text-ink-muted uppercase">
+					<h4 class="mb-2 text-xs font-semibold tracking-wide text-ink-muted uppercase">
 						{group.label}
-					</h3>
+					</h4>
 					<div class="space-y-3">
 						{#each group.items as m (m.market_object_id)}
 							{@render marketCard(m)}
@@ -584,9 +656,148 @@
 		</div>
 	{:else}
 		<div class="space-y-3">
-			{#each shown as m (m.market_object_id)}
+			{#each resolved as m (m.market_object_id)}
 				{@render marketCard(m)}
 			{/each}
 		</div>
 	{/if}
+{/snippet}
+
+<section class="p-5">
+	<div class="mb-3 flex items-center justify-between">
+		<h2 class="text-base font-semibold text-ink">Prediction Markets</h2>
+		<span class="text-xs text-ink-subdued">{totalShown} market{totalShown === 1 ? '' : 's'}</span>
+	</div>
+
+	<div class="md:flex md:gap-6">
+		<!-- Filters: left sidebar on desktop, stacked at the top on mobile -->
+		<aside class="mb-4 md:mb-0 md:w-48 md:shrink-0 md:border-r md:border-border md:pr-4">
+			<!-- Event switcher: horizontal on mobile, vertical on desktop -->
+			<div class="flex flex-row flex-wrap gap-x-4 gap-y-1 text-sm md:flex-col md:gap-1">
+				{#each categories as cat (cat.key)}
+					<button
+						type="button"
+						onclick={() => (category = cat.key)}
+						class="flex items-center gap-1.5 font-medium transition-colors {currentCategory ===
+						cat.key
+							? 'text-primary'
+							: 'text-ink-muted hover:text-ink'}"
+					>
+						{#if cat.key === 'live' && cat.count > 0}
+							<span class="h-1.5 w-1.5 animate-pulse rounded-full bg-error"></span>
+						{/if}
+						{cat.label}
+						<span class="text-xs text-ink-subdued">{cat.count}</span>
+					</button>
+				{/each}
+			</div>
+
+			<!-- Desktop: nested Sport → League tree -->
+			<div class="mt-3 hidden md:block">
+				<Separator class="mb-2" />
+				<p class="mb-1 px-1 text-[11px] font-semibold tracking-wide text-ink-subdued uppercase">
+					Sports
+				</p>
+				<button
+					type="button"
+					onclick={clearSport}
+					class="block w-full px-1 py-1 text-left text-sm transition-colors {allSports
+						? 'font-semibold text-primary'
+						: 'text-ink-muted hover:text-ink'}"
+				>
+					All sports
+				</button>
+				{#each SPORT_CATEGORIES as c (c.sport)}
+					{@const sportTotal = sportCounts.bySport[c.sport] ?? 0}
+					<details open={openSport === c.sport}>
+						<summary
+							onclick={(e) => toggleSport(e, c.sport)}
+							class="flex cursor-pointer list-none items-center justify-between px-1 py-1 text-sm select-none marker:content-none hover:text-ink [&::-webkit-details-marker]:hidden {sportTotal
+								? 'text-ink'
+								: 'text-ink-subdued'}"
+						>
+							<span class="flex items-center gap-1.5">
+								<span aria-hidden="true">{c.emoji}</span>{c.label}
+								{#if sportTotal}<span class="text-xs text-ink-subdued">{sportTotal}</span>{/if}
+							</span>
+							<ChevronDown
+								class="h-3.5 w-3.5 text-ink-subdued transition-transform {openSport === c.sport
+									? 'rotate-180'
+									: ''}"
+							/>
+						</summary>
+						<div class="flex flex-col">
+							<button
+								type="button"
+								onclick={() => selectSport(c.sport)}
+								class="px-1 py-1 pl-7 text-left text-xs transition-colors {sportFilter ===
+									c.sport && !leagueFilter
+									? 'font-semibold text-primary'
+									: 'text-ink-muted hover:text-ink'}"
+							>
+								All {c.label}
+							</button>
+							{#each c.leagues as lg (lg.slug)}
+								{@const n = sportCounts.byLeague[lg.slug] ?? 0}
+								<button
+									type="button"
+									onclick={() => selectLeague(c.sport, lg.slug)}
+									class="flex items-center justify-between px-1 py-1 pl-7 text-left text-xs transition-colors {leagueFilter ===
+									lg.slug
+										? 'font-semibold text-primary'
+										: n
+											? 'text-ink-muted hover:text-ink'
+											: 'text-ink-subdued'}"
+								>
+									<span>{lg.label}</span>
+									{#if n}<span class="text-[11px] text-ink-subdued">{n}</span>{/if}
+								</button>
+							{/each}
+						</div>
+					</details>
+				{/each}
+			</div>
+
+			<!-- Mobile: nested Sport dropdown -->
+			<div class="mt-3 md:hidden">
+				<DropdownMenu.Root>
+					<DropdownMenu.Trigger>
+						{#snippet child({ props })}
+							<Button {...props} variant="outline" size="sm" class="w-full justify-between gap-2">
+								<span class="truncate">{currentSportLabel}</span>
+								<ChevronDown class="h-4 w-4 shrink-0 opacity-60" />
+							</Button>
+						{/snippet}
+					</DropdownMenu.Trigger>
+					<DropdownMenu.Content class="w-56" align="start">
+						<DropdownMenu.Item onSelect={clearSport}>All sports</DropdownMenu.Item>
+						<DropdownMenu.Separator />
+						{#each SPORT_CATEGORIES as c (c.sport)}
+							<DropdownMenu.Sub>
+								<DropdownMenu.SubTrigger>
+									<span class="mr-2" aria-hidden="true">{c.emoji}</span>{c.label}
+								</DropdownMenu.SubTrigger>
+								<DropdownMenu.SubContent class="w-52">
+									<DropdownMenu.Item onSelect={() => selectSport(c.sport)}>
+										All {c.label}
+									</DropdownMenu.Item>
+									<DropdownMenu.Separator />
+									{#each c.leagues as lg (lg.slug)}
+										<DropdownMenu.Item onSelect={() => selectLeague(c.sport, lg.slug)}>
+											{lg.label}
+										</DropdownMenu.Item>
+									{/each}
+								</DropdownMenu.SubContent>
+							</DropdownMenu.Sub>
+						{/each}
+					</DropdownMenu.Content>
+				</DropdownMenu.Root>
+			</div>
+		</aside>
+
+		<!-- Market list -->
+		<div class="min-w-0 flex-1">
+			{@render content()}
+		</div>
+	</div>
 </section>

@@ -1,5 +1,4 @@
 <script lang="ts">
-	import Navbar from '$lib/components/generic/Navbar.svelte';
 	import { Markets, StakeDialog } from '$lib/features/markets';
 	import { NewsFeed } from '$lib/features/news';
 	import {
@@ -11,7 +10,7 @@
 		type UserPosition
 	} from '$lib/features/markets';
 	import { suiClient } from '$lib/sui';
-	import { signTransaction } from '$lib/features/wallet';
+	import { signTransaction, getAuthStore } from '$lib/features/wallet';
 	import { toast } from 'svelte-sonner';
 
 	const DUSDC_TYPE = import.meta.env.VITE_DUSDC_TYPE ?? '';
@@ -19,8 +18,10 @@
 	// Minimum SUI (in MIST) the wallet needs to cover gas (gas budget is 0.05 SUI).
 	const MIN_GAS_MIST = 60_000_000n;
 
-	let walletAddress = $state<string | null>(null);
-	let sessionToken = $state<string | null>(null);
+	// Wallet/session come from the shared store (navbar lives in the layout).
+	const auth = getAuthStore();
+	const walletAddress = $derived($auth.address);
+	const sessionToken = $derived($auth.sessionToken);
 	let marketsRef = $state<{ reload: () => void } | undefined>();
 
 	// Refresh the markets panel once the tx has propagated to the RPC, so pools
@@ -140,20 +141,23 @@
 	}
 </script>
 
-<div class="min-h-screen bg-background">
-	<Navbar bind:address={walletAddress} bind:sessionToken />
-
-	<main class="mx-auto max-w-3xl py-6 md:px-8">
-		<Markets
-			bind:this={marketsRef}
-			bind:walletAddress
-			{sessionToken}
-			onStake={handleStake}
-			onClaim={handleClaim}
-		/>
-		<NewsFeed />
-	</main>
-</div>
+<main class="mx-auto max-w-5xl py-6 md:px-8 lg:max-w-6xl">
+	<!-- Desktop (lg+): markets left, news in a right rail. Below lg: news stacks under. -->
+	<div class="lg:flex lg:items-start lg:gap-6">
+		<div class="min-w-0 lg:flex-1">
+			<Markets
+				bind:this={marketsRef}
+				{walletAddress}
+				{sessionToken}
+				onStake={handleStake}
+				onClaim={handleClaim}
+			/>
+		</div>
+		<aside class="lg:w-80 lg:shrink-0">
+			<NewsFeed />
+		</aside>
+	</div>
+</main>
 
 <StakeDialog
 	bind:open={stakeOpen}

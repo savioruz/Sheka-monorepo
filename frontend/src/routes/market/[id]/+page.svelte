@@ -1,8 +1,8 @@
 <script lang="ts">
 	import * as Tabs from '$lib/components/ui/tabs';
-	import { ArrowLeft } from '@lucide/svelte';
 	import { leagueLabel } from '$lib/utils';
 	import { formatStartChip, liveLabel, OUTCOME_LABEL } from '$lib/features/markets';
+	import { NewsCard } from '$lib/features/news';
 	import { formatBalance } from '$lib/sui';
 	import type { PageData } from './$types';
 
@@ -19,34 +19,35 @@
 	function fmtPool(units: number): string {
 		return formatBalance(BigInt(Math.round(units)), 6);
 	}
-
-	function fmtDate(iso: string | null): string {
-		if (!iso) return '';
-		const d = new Date(iso);
-		return Number.isNaN(d.getTime())
-			? ''
-			: d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-	}
 </script>
 
 <div class="mx-auto max-w-3xl px-4 py-6 sm:px-6 lg:px-8">
-	<a
-		href="/"
-		class="mb-4 inline-flex items-center gap-1 text-sm text-ink-muted transition-colors hover:text-ink"
-	>
-		<ArrowLeft class="h-4 w-4" /> Back to markets
-	</a>
-
 	<header class="mb-5">
 		<p class="text-xs text-ink-subdued">{leagueLabel(m.league)}</p>
 		<h1 class="mt-1 flex flex-wrap items-center gap-2 text-xl font-bold text-ink sm:text-2xl">
 			{#if m.home_logo}
-				<img src={m.home_logo} alt="" class="h-6 w-6 object-contain" onerror={hideImg} />
+				<img
+					src={m.home_logo}
+					alt=""
+					width="24"
+					height="24"
+					decoding="async"
+					class="h-6 w-6 object-contain"
+					onerror={hideImg}
+				/>
 			{/if}
 			{m.home}
 			<span class="text-ink-subdued">vs</span>
 			{#if m.away_logo}
-				<img src={m.away_logo} alt="" class="h-6 w-6 object-contain" onerror={hideImg} />
+				<img
+					src={m.away_logo}
+					alt=""
+					width="24"
+					height="24"
+					decoding="async"
+					class="h-6 w-6 object-contain"
+					onerror={hideImg}
+				/>
 			{/if}
 			{m.away}
 		</h1>
@@ -81,29 +82,11 @@
 			{#if data.articles.length === 0}
 				<p class="py-10 text-center text-sm text-ink-muted">No recent news for this match.</p>
 			{:else}
-				<ul class="space-y-4">
-					{#each data.articles as a (a.headline)}
-						<li class="flex gap-3">
-							{#if a.thumbnail}
-								<img
-									src={a.thumbnail}
-									alt=""
-									class="h-16 w-24 shrink-0 object-cover"
-									onerror={hideImg}
-								/>
-							{/if}
-							<div class="min-w-0">
-								<p class="font-semibold text-ink">{a.headline}</p>
-								{#if a.description}
-									<p class="mt-0.5 text-sm text-ink-muted">{a.description}</p>
-								{/if}
-								{#if a.published}
-									<p class="mt-1 text-xs text-ink-subdued">{fmtDate(a.published)}</p>
-								{/if}
-							</div>
-						</li>
+				<div class="grid gap-3">
+					{#each data.articles as a (a.id ?? a.headline)}
+						<NewsCard article={a} />
 					{/each}
-				</ul>
+				</div>
 			{/if}
 		</Tabs.Content>
 	</Tabs.Root>
