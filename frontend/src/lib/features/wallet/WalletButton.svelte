@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getNonce, verifyAuth } from './api';
 	import { Button } from '$lib/components/ui/button';
+	import * as Dialog from '$lib/components/ui/dialog';
 	import {
 		connectWallet,
 		disconnectWallet,
@@ -25,28 +26,27 @@
 	}>();
 
 	let isConnecting = $state(false);
+	let pickerOpen = $state(false);
 	let wallets = $state<WalletWithSuiFeatures[]>([]);
 
 	function discover() {
 		wallets = getAvailableWallets();
 	}
 
-	async function connect() {
+	// Connect a wallet by name, then run the nonce → sign → verify session flow.
+	// Works for both wallet-extensions and the Enoki Google (zkLogin) wallet.
+	async function authenticate(walletName: string) {
 		isConnecting = true;
-
 		try {
 			discover();
-			const connected = await connectWallet('slush');
+			await disconnectWallet(); // clear any prior wallet/session so the named one connects
+			const connected = await connectWallet(walletName);
 			const selectedAddress = connected.account.address;
 
 			const { nonce } = await getNonce(selectedAddress);
 			const signature = await signPersonalMessage(nonce);
 
-			const auth = await verifyAuth({
-				address: selectedAddress,
-				nonce,
-				signature
-			});
+			const auth = await verifyAuth({ address: selectedAddress, nonce, signature });
 
 			address = auth.wallet_address;
 			sessionToken = auth.session_token;
@@ -60,11 +60,11 @@
 					expiresAt: auth.expires_at
 				})
 			);
-			toast.success('Wallet connected', { description: truncate(auth.wallet_address) });
+			toast.success('Signed in', { description: truncate(auth.wallet_address) });
 		} catch (err) {
 			address = null;
 			sessionToken = null;
-			toast.error('Wallet connection failed', {
+			toast.error('Sign-in failed', {
 				description: err instanceof Error ? err.message : 'Connection failed'
 			});
 		} finally {
@@ -72,8 +72,18 @@
 		}
 	}
 
-	function disconnect() {
-		disconnectWallet();
+	function openPicker() {
+		discover();
+		pickerOpen = true;
+	}
+
+	function pick(walletName: string) {
+		pickerOpen = false;
+		void authenticate(walletName);
+	}
+
+	async function disconnect() {
+		await disconnectWallet();
 		address = null;
 		sessionToken = null;
 		localStorage.removeItem(STORAGE_KEY);
@@ -121,13 +131,41 @@
 		</div>
 		<Button variant="outline" size="sm" onclick={disconnect}>Disconnect</Button>
 	{:else}
-		<Button size="sm" onclick={connect} disabled={isConnecting}>
+		<Button size="sm" onclick={openPicker} disabled={isConnecting}>
 			<WalletIcon class="h-4 w-4" />
-			{isConnecting
-				? 'Connecting...'
-				: wallets.length > 0
-					? `Connect ${wallets[0].name}`
-					: 'Connect Wallet'}
+			{isConnecting ? 'Connecting…' : 'Connect'}
 		</Button>
 	{/if}
 </div>
+
+<Dialog.Root bind:open={pickerOpen}>
+	<Dialog.Content>
+		<Dialog.Header>
+			<Dialog.Title>Connect</Dialog.Title>
+			<Dialog.Description>Choose a wallet or sign in with Google.</Dialog.Description>
+		</Dialog.Header>
+
+		<div class="space-y-2">
+			{#if wallets.length === 0}
+				<p class="py-4 text-center text-sm text-ink-muted">
+					No Sui wallet detected. Install Slush or Suiet, or enable Google sign-in.
+				</p>
+			{:else}
+				{#each wallets as w (w.name)}
+					<button
+						type="button"
+						class="flex w-full items-center gap-3 rounded-md border border-border bg-background px-3 py-2.5 text-left text-sm transition-colors hover:bg-surface-1"
+						onclick={() => pick(w.name)}
+					>
+						{#if w.icon}
+							<img src={w.icon} alt="" class="h-5 w-5 shrink-0" />
+						{:else}
+							<WalletIcon class="h-5 w-5 shrink-0 text-ink-muted" />
+						{/if}
+						<span class="font-medium text-ink">{w.name}</span>
+					</button>
+				{/each}
+			{/if}
+		</div>
+	</Dialog.Content>
+</Dialog.Root>
