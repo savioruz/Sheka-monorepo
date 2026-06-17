@@ -3,6 +3,7 @@
 	import { getNonce, verifyAuth } from './api';
 	import { Button } from '$lib/components/ui/button';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import AccountDialog from './AccountDialog.svelte';
 	import {
 		connectWallet,
 		disconnectWallet,
@@ -27,6 +28,7 @@
 
 	let isConnecting = $state(false);
 	let pickerOpen = $state(false);
+	let accountOpen = $state(false);
 	let wallets = $state<WalletWithSuiFeatures[]>([]);
 
 	function discover() {
@@ -125,11 +127,14 @@
 
 <div class="flex items-center gap-3">
 	{#if address}
-		<div class="flex items-center gap-2 rounded-md border border-border bg-surface-1 px-3 py-1.5">
+		<button
+			type="button"
+			class="flex items-center gap-2 rounded-md border border-border bg-surface-1 px-3 py-1.5 transition-colors hover:border-ring"
+			onclick={() => (accountOpen = true)}
+		>
 			<WalletIcon class="h-4 w-4 text-primary" />
 			<span class="font-mono text-sm text-ink">{truncate(address)}</span>
-		</div>
-		<Button variant="outline" size="sm" onclick={disconnect}>Disconnect</Button>
+		</button>
 	{:else}
 		<Button size="sm" onclick={openPicker} disabled={isConnecting}>
 			<WalletIcon class="h-4 w-4" />
@@ -137,6 +142,8 @@
 		</Button>
 	{/if}
 </div>
+
+<AccountDialog bind:open={accountOpen} address={address ?? ''} onDisconnect={disconnect} />
 
 <Dialog.Root bind:open={pickerOpen}>
 	<Dialog.Content>
