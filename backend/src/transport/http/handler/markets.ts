@@ -231,6 +231,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
     if (!row) return c.json(error('not_found', 'Market not found'), 404);
 
     let articles: {
+      id: number | null;
       headline: string;
       description: string;
       published: string | null;
@@ -243,6 +244,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
         row.awayTeam,
       ]);
       articles = raw.map((a) => ({
+        id: a.id ?? null,
         headline: a.headline,
         description: a.description ?? '',
         published: a.published ?? null,

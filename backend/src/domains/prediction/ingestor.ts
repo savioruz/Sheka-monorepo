@@ -58,6 +58,8 @@ interface ESPNAthlete {
 }
 
 interface ESPNNewsArticle {
+  id?: number;
+  espn_id?: string;
   headline: string;
   description?: string;
   published?: string;
@@ -65,6 +67,9 @@ interface ESPNNewsArticle {
   thumbnail?: string;
   league_slug?: string | null;
   sport_slug?: string | null;
+  // Present on the detail endpoint only.
+  links?: { web?: { href?: string } } & Record<string, unknown>;
+  images?: Array<{ url?: string }>;
 }
 
 interface ESPNInjury {
@@ -140,6 +145,55 @@ export function pickRelevantNews<T extends { headline?: string; description?: st
     return terms.some((t) => hay.includes(t));
   });
   return (relevant.length >= min ? relevant : articles).slice(0, limit);
+}
+
+// Generic words that appear in many team names (and bracket placeholders) and so
+// make poor, over-broad search terms on their own.
+const TEAM_NAME_STOPWORDS = new Set([
+  'fc',
+  'sc',
+  'ac',
+  'afc',
+  'cf',
+  'cd',
+  'club',
+  'city',
+  'united',
+  'real',
+  'town',
+  'county',
+  'athletic',
+  'atletico',
+  'sporting',
+  'deportivo',
+  'the',
+  'and',
+  'de',
+  'of',
+  // World Cup / playoff bracket placeholders (e.g. "Quarterfinal 3 Winner").
+  'winner',
+  'loser',
+  'group',
+  'round',
+  'final',
+  'quarterfinal',
+  'semifinal',
+  'playoff',
+]);
+
+/**
+ * Distinctive search tokens for a team display name, for ESPN's token-AND search.
+ * Drops generic/short words ("Manchester United" → ["manchester"]; "Kansas City
+ * Chiefs" → ["kansas", "chiefs"]; "Sweden" → ["sweden"]). Returns [] when nothing
+ * distinctive remains (e.g. a bracket placeholder like "Round of 16 1 Winner").
+ */
+export function teamSearchTerms(displayName: string | null | undefined): string[] {
+  if (typeof displayName !== 'string') return [];
+  const tokens = displayName
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && !TEAM_NAME_STOPWORDS.has(t) && !/^\d+$/.test(t));
+  return [...new Set(tokens)];
 }
 
 export function createIngestor(deps: IngestorDeps) {
@@ -228,36 +282,94 @@ export function createIngestor(deps: IngestorDeps) {
     return data?.results ?? [];
   }
 
-  async function fetchNewsForSport(sport: Sport, league: string): Promise<ESPNNewsArticle[]> {
-    const params = new URLSearchParams({
-      sport,
-      league,
-      limit: '8',
-    });
+  // ESPN news is PageNumberPagination (25/page). Fetch a single page (1-indexed).
+  async function fetchNewsPage(
+    page: number,
+    opts: { sport?: string; league?: string; search?: string } = {},
+  ): Promise<ESPNApiResponse<ESPNNewsArticle>> {
+    const params = new URLSearchParams({ page: String(page) });
+    if (opts.sport) params.set('sport', opts.sport);
+    if (opts.league) params.set('league', opts.league);
+    if (opts.search) params.set('search', opts.search);
     const data = await fetchJson<ESPNApiResponse<ESPNNewsArticle>>(
       `/api/v1/news/?${params.toString()}`,
     );
-    return data?.results ?? [];
+    return data ?? { count: 0, results: [] };
   }
 
-  // Recent news across ALL leagues (newest-first), for the home-page feed.
-  async function fetchRecentNews(limit = 24): Promise<ESPNNewsArticle[]> {
-    const params = new URLSearchParams({ limit: String(limit) });
-    const data = await fetchJson<ESPNApiResponse<ESPNNewsArticle>>(
-      `/api/v1/news/?${params.toString()}`,
-    );
-    return data?.results ?? [];
+  async function fetchNewsForSport(
+    sport: Sport,
+    league: string,
+    opts: { search?: string } = {},
+  ): Promise<ESPNNewsArticle[]> {
+    const data = await fetchNewsPage(1, { sport, league, search: opts.search });
+    return data.results;
   }
 
-  // League news filtered to a specific match's teams (see pickRelevantNews).
+  // Recent news for the home feed / news page, sliced to [offset, offset+limit).
+  // ESPN pages are 25 wide, so we fetch only the page(s) overlapping the window.
+  // `filters` (search/sport/league) are forwarded to ESPN. `total` is the full
+  // filtered result count (for paging).
+  const NEWS_PAGE_SIZE = 25;
+  async function fetchRecentNews(
+    offset = 0,
+    limit = 8,
+    filters: { search?: string; sport?: string; league?: string } = {},
+  ): Promise<{ articles: ESPNNewsArticle[]; hasMore: boolean; total: number }> {
+    const startPage = Math.floor(offset / NEWS_PAGE_SIZE) + 1;
+    const endPage = Math.floor((offset + limit - 1) / NEWS_PAGE_SIZE) + 1;
+    let count = 0;
+    const collected: ESPNNewsArticle[] = [];
+    for (let page = startPage; page <= endPage; page++) {
+      const data = await fetchNewsPage(page, filters);
+      // The window can spill past the last ESPN page (pages are 25 wide), and an
+      // out-of-range page 404s → { count: 0 }. Don't let that clobber the real
+      // total, and stop once a page yields nothing.
+      if (data.count > 0) count = data.count;
+      collected.push(...data.results);
+      if (data.results.length === 0) break;
+    }
+    const sliceStart = offset - (startPage - 1) * NEWS_PAGE_SIZE;
+    const articles = collected.slice(sliceStart, sliceStart + limit);
+    return { articles, hasMore: offset + limit < count, total: count };
+  }
+
+  // News relevant to a match. We search ESPN per team and union the results
+  // (newest-first). Key detail: ESPN's search AND-matches the whitespace-split
+  // tokens, so the full display name ("Kansas City Chiefs") almost never matches
+  // a short headline ("Chiefs win") — and no single token position is reliable
+  // across sports ("Broncos" → many hits, "Denver" → none). So we search EACH
+  // distinctive token per team and union; every hit therefore contains a team
+  // token within the sport+league, which keeps results on-topic. When nothing
+  // distinctive matches we return [] rather than padding with generic league
+  // news the user did not ask for.
   async function fetchRelevantNews(
     sport: Sport,
     league: string,
     teamTerms: (string | null | undefined)[],
     limit = 8,
   ): Promise<ESPNNewsArticle[]> {
-    const news = await fetchNewsForSport(sport, league);
-    return pickRelevantNews(news, teamTerms, { limit });
+    const searchTerms = new Set<string>();
+    for (const team of teamTerms) {
+      for (const term of teamSearchTerms(team)) searchTerms.add(term);
+    }
+    if (searchTerms.size === 0) return [];
+
+    const perTerm = await Promise.all(
+      [...searchTerms].map((term) =>
+        fetchNewsForSport(sport, league, { search: term }).catch(() => []),
+      ),
+    );
+    const byKey = new Map<string, ESPNNewsArticle>();
+    for (const a of perTerm.flat()) byKey.set(String(a.id ?? a.espn_id ?? a.headline), a);
+    return [...byKey.values()]
+      .sort((a, b) => new Date(b.published ?? 0).getTime() - new Date(a.published ?? 0).getTime())
+      .slice(0, limit);
+  }
+
+  // Full detail for one article (adds links/images). Returns null if not found.
+  async function fetchNewsDetail(id: string | number): Promise<ESPNNewsArticle | null> {
+    return fetchJson<ESPNNewsArticle>(`/api/v1/news/${id}/`);
   }
 
   async function fetchInjuriesForTeam(abbreviation: string): Promise<ESPNInjury[]> {
@@ -548,6 +660,7 @@ export function createIngestor(deps: IngestorDeps) {
     refreshScoreboard,
     fetchRelevantNews,
     fetchRecentNews,
+    fetchNewsDetail,
   };
 }
 
