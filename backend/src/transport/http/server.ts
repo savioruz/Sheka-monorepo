@@ -3,6 +3,9 @@ import { createVerifier } from '@auth/verify';
 import type { Config } from '@config/config';
 import type { Database } from '@db/index';
 import type { AnalysisService } from '@domains/analysis/service';
+import { createCryptoAnalyst } from '@domains/crypto/crypto-analyst';
+import { createCryptoNews } from '@domains/crypto/crypto-news';
+import { createPredictClient } from '@domains/crypto/predict-client';
 import type { MarketService } from '@domains/market/service';
 import type { Analyst } from '@domains/prediction/analyst';
 import type { Ingestor } from '@domains/prediction/ingestor';
@@ -15,6 +18,7 @@ import { cors } from 'hono/cors';
 import { registerAnalysisRoutes } from './handler/analysis';
 import { registerNonceRoutes } from './handler/auth/nonce';
 import { registerVerifyRoutes } from './handler/auth/verify';
+import { registerCryptoRoutes } from './handler/crypto';
 import { registerGamesRoutes } from './handler/games';
 import { registerHealthRoutes } from './handler/health';
 import { registerMarketsRoutes } from './handler/markets';
@@ -38,6 +42,9 @@ export function createServer(deps: ServerDeps): Hono {
 
   const nonceManager = createNonceManager({ db });
   const verifier = createVerifier({ db, nonceManager, suiRpcUrl: config.sui.rpcUrl });
+  const predictClient = createPredictClient({ config, logger });
+  const cryptoNews = createCryptoNews({ logger });
+  const cryptoAnalyst = createCryptoAnalyst({ config, logger });
   const authMiddleware = createAuthMiddleware({ verifier });
 
   const app = new Hono();
@@ -66,10 +73,15 @@ export function createServer(deps: ServerDeps): Hono {
   registerGamesRoutes(app, { ingestor });
   registerSportsRoutes(app, { ingestor });
   registerNewsRoutes(app, { ingestor });
+
+  // Auth-gated subpaths MUST be declared before the routes they protect — Hono
+  // only applies `app.use` to handlers registered after it. The crypto analyze
+  // gate therefore has to come before registerCryptoRoutes.
+  app.use('/api/crypto/markets/:oracleId/analyze', authMiddleware);
+  registerCryptoRoutes(app, { predictClient, cryptoNews, cryptoAnalyst, analysisService, db });
   registerNonceRoutes(app, { nonceManager });
   registerVerifyRoutes(app, { verifier });
 
-  // Auth-gated subpaths (must be declared before the routes they protect).
   app.use('/api/markets/:id/analyze', authMiddleware);
   app.use('/api/analysis/quota', authMiddleware);
   app.use('/api/analysis/mine', authMiddleware);

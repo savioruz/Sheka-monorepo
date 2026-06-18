@@ -92,3 +92,78 @@ export async function decryptAnalysis(
 	const plaintext = await sealClient.decrypt({ data: ciphertext, sessionKey, txBytes });
 	return JSON.parse(new TextDecoder().decode(plaintext));
 }
+
+// ---------------------------------------------------------------------------
+// Public, verifiable proof bundle (plaintext on Walrus — no reasoning).
+// ---------------------------------------------------------------------------
+
+interface ProofTeam {
+	team: string;
+	score: number | null;
+	injuries: { name: string; status: string }[];
+	key_stats: { name: string; stat: string }[];
+}
+
+export interface PublicProof {
+	schema_version: number;
+	created_at: string;
+	market: { id: string; home: string; away: string; league: string; sport: string };
+	model: { id: number; label: string };
+	inputs: {
+		status: string;
+		venue: string | null;
+		home: ProofTeam;
+		away: ProofTeam;
+		news: string[];
+	};
+	ai: { model_probs: number[]; implied_prob: number; confidence_tier: string };
+	kelly: {
+		outcome: number;
+		label: string;
+		p: number;
+		implied: number;
+		edge: number;
+		f_star: number;
+	};
+	content_sha256: string;
+}
+
+/** Stable JSON with recursively sorted keys — must match the backend `canonicalize`. */
+function canonicalize(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+	if (value && typeof value === 'object') {
+		const entries = Object.entries(value as Record<string, unknown>)
+			.filter(([, v]) => v !== undefined)
+			.sort(([a], [b]) => (a < b ? -1 : 1))
+			.map(([k, v]) => `${JSON.stringify(k)}:${canonicalize(v)}`);
+		return `{${entries.join(',')}}`;
+	}
+	return JSON.stringify(value ?? null);
+}
+
+async function sha256Hex(s: string): Promise<string> {
+	const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+	return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Public Walrus aggregator URL for a blob (judges can open it directly). */
+export function walrusBlobUrl(blobId: string): string {
+	return `${AGGREGATOR_URL}/v1/blobs/${blobId}`;
+}
+
+/**
+ * Fetch the PUBLIC proof bundle from Walrus and verify its integrity by
+ * recomputing the content hash over the canonical bundle (minus the hash field).
+ * No wallet needed — anyone can verify.
+ */
+export async function getPublicProof(
+	publicBlobId: string
+): Promise<{ proof: PublicProof; verified: boolean }> {
+	const res = await fetch(walrusBlobUrl(publicBlobId));
+	if (!res.ok) throw new Error(`Could not read proof (Walrus ${res.status})`);
+	const proof = (await res.json()) as PublicProof;
+	const { content_sha256, ...rest } = proof;
+	const verified =
+		Boolean(content_sha256) && (await sha256Hex(canonicalize(rest))) === content_sha256;
+	return { proof, verified };
+}

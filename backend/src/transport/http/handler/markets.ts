@@ -96,12 +96,59 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
       reasoning: analysis.reasoning,
     };
 
-    // 4) Seal-encrypt the result and store it on Walrus (owner-decryptable).
-    const blobId = await analysisService.encryptAndStore(access.receiptId, {
-      market: { home: row.homeTeam, away: row.awayTeam, league: row.league },
-      model: model.label,
-      ...recommendation,
+    // 4) Build a verifiable PROOF BUNDLE — the inputs the model saw + its output +
+    //    the Kelly math — then archive it on Walrus: a public, hash-verifiable
+    //    summary (no reasoning) + a Seal-encrypted full copy (owner-only).
+    const chosenP = probs[rec.outcome] ?? 0; // 0..1
+    const fStar =
+      rec.impliedProb < 1 ? Math.max(0, (chosenP - rec.impliedProb) / (1 - rec.impliedProb)) : 0;
+    const teamInputs = (t: (typeof game)['homeTeam']) => ({
+      team: t.displayName,
+      score: t.score,
+      injuries: t.injuries.map((i) => ({ name: i.athleteName, status: i.status })),
+      key_stats: t.keyStats.map((s) => ({ name: s.athleteName, stat: s.statSummary })),
     });
+    const publicBundle = {
+      schema_version: 1,
+      created_at: new Date().toISOString(),
+      market: {
+        id: marketObjectId,
+        home: row.homeTeam,
+        away: row.awayTeam,
+        league: row.league,
+        sport: row.sport,
+      },
+      model: { id: model.id, label: model.label },
+      inputs: {
+        status: game.status,
+        venue: game.venue?.name ?? null,
+        home: teamInputs(game.homeTeam),
+        away: teamInputs(game.awayTeam),
+        news: game.recentNews.slice(0, 5).map((n) => n.headline),
+      },
+      ai: {
+        model_probs: recommendation.model_probs, // [home, draw, away] %
+        implied_prob: recommendation.implied_prob, // %
+        confidence_tier: recommendation.confidence_tier,
+      },
+      kelly: {
+        outcome: rec.outcome,
+        label: OUTCOME_LABEL[rec.outcome],
+        p: Math.round(chosenP * 1000) / 10, // %
+        implied: recommendation.implied_prob, // %
+        edge: recommendation.edge, // %
+        f_star: Math.round(fStar * 1000) / 10, // %
+      },
+    };
+    const { publicBlobId, blobId, contentSha256 } = await analysisService.storeProof(
+      access.receiptId,
+      publicBundle,
+      {
+        market: { home: row.homeTeam, away: row.awayTeam, league: row.league },
+        model: model.label,
+        ...recommendation,
+      },
+    );
 
     // 5) Consume-on-success.
     await db
@@ -112,11 +159,13 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
         modelId: model_id,
         marketId: marketObjectId,
         blobId,
+        publicBlobId,
+        contentSha256,
         status: 'done',
       })
       .onConflictDoUpdate({
         target: analysisPayments.receiptId,
-        set: { status: 'done', blobId, updatedAt: new Date() },
+        set: { status: 'done', blobId, publicBlobId, contentSha256, updatedAt: new Date() },
       });
 
     return c.json(
@@ -124,6 +173,8 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
         model: model.label,
         receipt_id: access.receiptId,
         blob_id: blobId,
+        public_blob_id: publicBlobId,
+        content_sha256: contentSha256,
         recommendation,
       }),
     );

@@ -1,9 +1,27 @@
+import { createHash } from 'node:crypto';
 import type { Config } from '@config/config';
 import type { Database } from '@db/index';
 import { models } from '@db/schema/models';
 import type { Logger } from '@infras/logger/logger';
 import { SealClient } from '@mysten/seal';
 import { SuiClient } from '@mysten/sui/client';
+
+// Stable JSON (recursively sorted keys) so a hash is reproducible by any verifier.
+function canonicalize(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonicalize(v)}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function sha256Hex(s: string): string {
+  return createHash('sha256').update(s).digest('hex');
+}
 
 // Testnet Seal key server (independent, open mode).
 const SEAL_KEY_SERVERS = ['0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75'];
@@ -132,45 +150,67 @@ export function createAnalysisService(deps: AnalysisServiceDeps) {
     }
   }
 
+  // PUT raw bytes to the Walrus publisher; returns the blob id (or null).
+  async function putBlob(body: Uint8Array): Promise<string | null> {
+    const publisher = config.walrus.publisherUrl.replace(/\/$/, '');
+    const res = await fetch(`${publisher}/v1/blobs?epochs=${config.walrus.epochs}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Blob([new Uint8Array(body)]),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!res.ok) throw new Error(`Walrus publisher ${res.status}`);
+    const out = (await res.json()) as {
+      newlyCreated?: { blobObject?: { blobId?: string } };
+      alreadyCertified?: { blobId?: string };
+    };
+    return out?.newlyCreated?.blobObject?.blobId ?? out?.alreadyCertified?.blobId ?? null;
+  }
+
   /**
-   * Seal-encrypt the analysis result keyed to the receipt id, store the
-   * ciphertext on Walrus, and return the blob id. Only the receipt owner can
-   * later decrypt it (contract `seal_approve`). Returns null on failure.
+   * Archive an analysis as a verifiable proof on Walrus:
+   * - a PUBLIC plaintext blob = `publicBundle` + its own `content_sha256`
+   *   (anyone can fetch from the aggregator and recompute the hash to verify integrity),
+   * - a PRIVATE Seal-encrypted blob = `privatePayload` (full result incl. reasoning),
+   *   decryptable only by the receipt owner via the contract `seal_approve`.
+   * Returns the two blob ids + the content hash (null fields on failure).
    */
-  async function encryptAndStore(receiptId: string, payload: unknown): Promise<string | null> {
+  async function storeProof(
+    receiptId: string,
+    publicBundle: Record<string, unknown>,
+    privatePayload: unknown,
+  ): Promise<{ publicBlobId: string | null; blobId: string | null; contentSha256: string | null }> {
     try {
-      const data = new TextEncoder().encode(JSON.stringify(payload));
+      const contentSha256 = sha256Hex(canonicalize(publicBundle));
+      const publicBlobId = await putBlob(
+        new TextEncoder().encode(
+          JSON.stringify({ ...publicBundle, content_sha256: contentSha256 }),
+        ),
+      );
+
       const { encryptedObject } = await sealClient.encrypt({
         threshold: 1,
         packageId: config.analysis.packageId,
         id: receiptId,
-        data,
+        data: new TextEncoder().encode(JSON.stringify(privatePayload)),
       });
-      const publisher = config.walrus.publisherUrl.replace(/\/$/, '');
-      const res = await fetch(`${publisher}/v1/blobs?epochs=${config.walrus.epochs}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: encryptedObject,
-        signal: AbortSignal.timeout(30000),
-      });
-      if (!res.ok) throw new Error(`Walrus publisher ${res.status}`);
-      const out = (await res.json()) as {
-        newlyCreated?: { blobObject?: { blobId?: string } };
-        alreadyCertified?: { blobId?: string };
-      };
-      const blobId = out?.newlyCreated?.blobObject?.blobId ?? out?.alreadyCertified?.blobId ?? null;
-      logger.info({ receiptId, blobId }, 'Seal-encrypted analysis stored on Walrus');
-      return blobId;
+      const blobId = await putBlob(encryptedObject);
+
+      logger.info(
+        { receiptId, publicBlobId, blobId, contentSha256 },
+        'analysis proof stored on Walrus',
+      );
+      return { publicBlobId, blobId, contentSha256 };
     } catch (err) {
       logger.warn(
         { receiptId, error: err instanceof Error ? err.message : String(err) },
-        'encryptAndStore failed',
+        'storeProof failed',
       );
-      return null;
+      return { publicBlobId: null, blobId: null, contentSha256: null };
     }
   }
 
-  return { seedModels, verifyAccess, freeUsed, encryptAndStore };
+  return { seedModels, verifyAccess, freeUsed, storeProof };
 }
 
 export type AnalysisService = ReturnType<typeof createAnalysisService>;

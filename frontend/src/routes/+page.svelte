@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Markets, StakeDialog } from '$lib/features/markets';
+	import { CryptoMarkets, CryptoNews } from '$lib/features/crypto';
 	import { NewsFeed } from '$lib/features/news';
 	import {
 		buildStakeTransaction,
@@ -23,6 +24,9 @@
 	const walletAddress = $derived($auth.address);
 	const sessionToken = $derived($auth.sessionToken);
 	let marketsRef = $state<{ reload: () => void } | undefined>();
+
+	// Product switch: sports parimutuel markets vs DeepBook Predict crypto markets.
+	let tab = $state<'sports' | 'crypto'>('sports');
 
 	// Refresh the markets panel once the tx has propagated to the RPC, so pools
 	// and positions reflect the just-placed stake/claim without a hard reload.
@@ -142,19 +146,49 @@
 </script>
 
 <main class="mx-auto max-w-5xl py-6 md:px-8 lg:max-w-6xl">
+	<!-- Product switch: Sports parimutuel vs Crypto (DeepBook Predict) -->
+	<div class="flex items-center gap-4 px-5 text-sm">
+		<button
+			type="button"
+			onclick={() => (tab = 'sports')}
+			class="font-semibold transition-colors {tab === 'sports'
+				? 'text-primary'
+				: 'text-ink-muted hover:text-ink'}"
+		>
+			Sports
+		</button>
+		<button
+			type="button"
+			onclick={() => (tab = 'crypto')}
+			class="font-semibold transition-colors {tab === 'crypto'
+				? 'text-primary'
+				: 'text-ink-muted hover:text-ink'}"
+		>
+			Crypto
+		</button>
+	</div>
+
 	<!-- Desktop (lg+): markets left, news in a right rail. Below lg: news stacks under. -->
 	<div class="lg:flex lg:items-start lg:gap-6">
 		<div class="min-w-0 lg:flex-1">
-			<Markets
-				bind:this={marketsRef}
-				{walletAddress}
-				{sessionToken}
-				onStake={handleStake}
-				onClaim={handleClaim}
-			/>
+			{#if tab === 'sports'}
+				<Markets
+					bind:this={marketsRef}
+					{walletAddress}
+					{sessionToken}
+					onStake={handleStake}
+					onClaim={handleClaim}
+				/>
+			{:else}
+				<CryptoMarkets {walletAddress} {sessionToken} />
+			{/if}
 		</div>
 		<aside class="lg:w-80 lg:shrink-0">
-			<NewsFeed />
+			{#if tab === 'crypto'}
+				<CryptoNews />
+			{:else}
+				<NewsFeed />
+			{/if}
 		</aside>
 	</div>
 </main>

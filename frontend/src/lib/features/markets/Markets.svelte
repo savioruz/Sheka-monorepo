@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getMarkets, getModels } from './api';
-	import { getQuota, analyzeMarket, getMyAnalyses } from '$lib/features/analysis';
+	import { getQuota, analyzeMarket, getMyAnalyses, ProofBadge } from '$lib/features/analysis';
 	import {
 		fetchUserPositions,
 		marketTab,
@@ -58,6 +58,8 @@
 	let loading = $state(true);
 	let recs = $state<Record<string, Pick>>({});
 	let sealRef = $state<Record<string, { blobId: string; receiptId: string }>>({});
+	// market_object_id → public proof blob id (plaintext, hash-verifiable on Walrus).
+	let proofRef = $state<Record<string, string>>({});
 	let selectedModel = $state<Record<string, number>>({});
 	let analyzing = $state<string | null>(null);
 	let decrypting = $state<string | null>(null);
@@ -97,7 +99,6 @@
 	const soon = $derived(byTab.starting_soon.slice().sort(byTime));
 	const upcoming = $derived(byTab.upcoming.slice().sort(byTime));
 	const resolved = $derived(byTab.resolved.slice().sort((a, b) => ts(b) - ts(a)));
-	const totalShown = $derived(live.length + soon.length + upcoming.length + resolved.length);
 
 	// Upcoming grouped by day (undated "Scheduled" group last).
 	const dayGroups = $derived.by(() => {
@@ -225,6 +226,7 @@
 				if (a.market_id && a.blob_id && !sealRef[a.market_id]) {
 					sealRef[a.market_id] = { blobId: a.blob_id, receiptId: a.receipt_id };
 				}
+				if (a.market_id && a.public_blob_id) proofRef[a.market_id] = a.public_blob_id;
 			}
 		} catch {
 			/* ignore */
@@ -289,6 +291,7 @@
 				if (r.blob_id && r.receipt_id) {
 					sealRef[market.market_object_id] = { blobId: r.blob_id, receiptId: r.receipt_id };
 				}
+				if (r.public_blob_id) proofRef[market.market_object_id] = r.public_blob_id;
 				toast.success('Analysis ready', {
 					id: toastId,
 					description: `${model.label}: ${r.recommendation.label}`
@@ -536,28 +539,39 @@
 				>
 					{pick.reasoning}
 				</button>
-				{#if sealRef[m.market_object_id]}
-					<div class="mt-2 flex items-center justify-between gap-2 pt-2">
-						<span class="truncate text-[10px] text-ink-muted">🔒 Sealed on Walrus · owner-only</span
-						>
+				{#if proofRef[m.market_object_id] || sealRef[m.market_object_id]}
+					<div class="mt-2 flex flex-col gap-1 pt-2">
+						{#if proofRef[m.market_object_id]}
+							<ProofBadge publicBlobId={proofRef[m.market_object_id]} />
+						{/if}
+						{#if sealRef[m.market_object_id]}
+							<span class="truncate text-[10px] text-ink-muted"
+								>🔒 Full reasoning Seal-encrypted · owner-only</span
+							>
+						{/if}
 					</div>
 				{/if}
 			</div>
-		{:else if walletAddress && sealRef[m.market_object_id]}
-			<!-- Owned analysis from a previous session — decrypt to view (owner-only). -->
-			<div
-				class="relative z-10 mt-2 flex items-center justify-between gap-2 bg-primary-subtle/40 p-2 text-xs"
-			>
-				<span class="truncate text-ink-muted">🔒 You own an analysis for this market</span>
-				<Button
-					size="sm"
-					variant="outline"
-					class="h-7 shrink-0"
-					onclick={() => decrypt(m)}
-					disabled={decrypting === m.market_object_id}
-				>
-					{decrypting === m.market_object_id ? 'Decrypting…' : 'Decrypt to view'}
-				</Button>
+		{:else if walletAddress && (sealRef[m.market_object_id] || proofRef[m.market_object_id])}
+			<!-- Owned analysis from a previous session — public proof + owner-only decrypt. -->
+			<div class="relative z-10 mt-2 flex flex-col gap-1.5 bg-primary-subtle/40 p-2 text-xs">
+				<div class="flex items-center justify-between gap-2">
+					<span class="truncate text-ink-muted">🔒 You own an analysis for this market</span>
+					{#if sealRef[m.market_object_id]}
+						<Button
+							size="sm"
+							variant="outline"
+							class="h-7 shrink-0"
+							onclick={() => decrypt(m)}
+							disabled={decrypting === m.market_object_id}
+						>
+							{decrypting === m.market_object_id ? 'Decrypting…' : 'Decrypt to view'}
+						</Button>
+					{/if}
+				</div>
+				{#if proofRef[m.market_object_id]}
+					<ProofBadge publicBlobId={proofRef[m.market_object_id]} />
+				{/if}
 			</div>
 		{/if}
 
@@ -664,11 +678,6 @@
 {/snippet}
 
 <section class="p-5">
-	<div class="mb-3 flex items-center justify-between">
-		<h2 class="text-base font-semibold text-ink">Prediction Markets</h2>
-		<span class="text-xs text-ink-subdued">{totalShown} market{totalShown === 1 ? '' : 's'}</span>
-	</div>
-
 	<div class="md:flex md:gap-6">
 		<!-- Filters: left sidebar on desktop, stacked at the top on mobile -->
 		<aside class="mb-4 md:mb-0 md:w-48 md:shrink-0 md:border-r md:border-border md:pr-4">
