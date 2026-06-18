@@ -14,9 +14,7 @@
 	import type { WalletWithSuiFeatures } from '@mysten/wallet-standard';
 	import { Wallet as WalletIcon } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
-	import { getAuthStore } from './auth';
-
-	const STORAGE_KEY = 'sheka_auth';
+	import { getAuthStore, STORAGE_KEY } from './auth';
 
 	// Shared wallet/session state (set in +layout.svelte) so every route's navbar
 	// and pages observe the same connection.

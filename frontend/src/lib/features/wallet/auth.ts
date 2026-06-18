@@ -8,6 +8,19 @@ export interface AuthState {
 
 const AUTH_KEY = Symbol('auth');
 
+// Persisted session (token + wallet) so a reload can silently reconnect.
+export const STORAGE_KEY = 'sheka_auth';
+
+/** Clear the in-memory session + persisted storage (on sign-out or 401 expiry). */
+export function clearAuth(store: Writable<AuthState>): void {
+	store.set({ address: null, sessionToken: null });
+	try {
+		localStorage.removeItem(STORAGE_KEY);
+	} catch {
+		/* SSR / no storage — ignore */
+	}
+}
+
 export function initAuthStore(): Writable<AuthState> {
 	const store = writable<AuthState>({
 		address: null,

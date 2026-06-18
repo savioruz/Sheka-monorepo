@@ -8,6 +8,18 @@ export interface RequestOptions {
 	token?: string | null;
 }
 
+// A 401 on a token-bearing request means the session token expired/was revoked
+// (24h TTL, no refresh). The layout registers a handler that clears the session
+// and prompts re-auth. Kept here so the API layer stays decoupled from Svelte.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+	onUnauthorized = fn;
+}
+/** Trigger the registered 401 handler (for code paths that bypass `request`, e.g. SSE). */
+export function notifyUnauthorized(): void {
+	onUnauthorized?.();
+}
+
 /** Shared fetch core — every feature's api.ts builds on this. */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
 	const url = `${API_BASE_URL}${path}`;
@@ -42,6 +54,8 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 	}
 
 	if (!response.ok) {
+		// Expired/invalid session on an authed call → clear session + prompt re-auth.
+		if (response.status === 401 && options.token) onUnauthorized?.();
 		const message =
 			typeof json === 'object' && json !== null && 'message' in json
 				? String((json as { message: unknown }).message)

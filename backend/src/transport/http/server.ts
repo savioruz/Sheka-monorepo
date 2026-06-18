@@ -2,6 +2,7 @@ import { createNonceManager } from '@auth/nonce';
 import { createVerifier } from '@auth/verify';
 import type { Config } from '@config/config';
 import type { Database } from '@db/index';
+import { createAnalysisJobs } from '@domains/analysis/jobs';
 import type { AnalysisService } from '@domains/analysis/service';
 import { createCryptoAnalyst } from '@domains/crypto/crypto-analyst';
 import { createCryptoNews } from '@domains/crypto/crypto-news';
@@ -45,6 +46,7 @@ export function createServer(deps: ServerDeps): Hono {
   const predictClient = createPredictClient({ config, logger });
   const cryptoNews = createCryptoNews({ logger });
   const cryptoAnalyst = createCryptoAnalyst({ config, logger });
+  const analysisJobs = createAnalysisJobs();
   const authMiddleware = createAuthMiddleware({ verifier });
 
   const app = new Hono();
@@ -78,16 +80,33 @@ export function createServer(deps: ServerDeps): Hono {
   // only applies `app.use` to handlers registered after it. The crypto analyze
   // gate therefore has to come before registerCryptoRoutes.
   app.use('/api/crypto/markets/:oracleId/analyze', authMiddleware);
-  registerCryptoRoutes(app, { predictClient, cryptoNews, cryptoAnalyst, analysisService, db });
+  app.use('/api/crypto/markets/:oracleId/analyze/stream', authMiddleware);
+  registerCryptoRoutes(app, {
+    predictClient,
+    cryptoNews,
+    cryptoAnalyst,
+    analysisService,
+    analysisJobs,
+    db,
+  });
   registerNonceRoutes(app, { nonceManager });
   registerVerifyRoutes(app, { verifier });
 
   app.use('/api/markets/:id/analyze', authMiddleware);
+  app.use('/api/markets/:id/analyze/stream', authMiddleware);
   app.use('/api/analysis/quota', authMiddleware);
   app.use('/api/analysis/mine', authMiddleware);
+  app.use('/api/analysis/job/:receiptId', authMiddleware);
 
-  registerAnalysisRoutes(app, { config, db, analysisService });
-  registerMarketsRoutes(app, { db, marketService, ingestor, analyst, analysisService });
+  registerAnalysisRoutes(app, { config, db, analysisService, analysisJobs });
+  registerMarketsRoutes(app, {
+    db,
+    marketService,
+    ingestor,
+    analyst,
+    analysisService,
+    analysisJobs,
+  });
 
   if (config.app.env === 'development') {
     createOpenAPIRouter(app);

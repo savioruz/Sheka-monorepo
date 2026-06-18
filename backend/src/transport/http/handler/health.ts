@@ -1,5 +1,6 @@
 import type { Database } from '@db/index';
 import { ping } from '@db/index';
+import { traced } from '@infras/otel/otel';
 import type { Hono } from 'hono';
 import { error, success } from '../response';
 
@@ -11,7 +12,7 @@ export function registerHealthRoutes(app: Hono, deps: HealthDeps) {
   const { db } = deps;
 
   app.get('/health', async (c) => {
-    const databaseConnected = await ping(db);
+    const databaseConnected = await traced('health.dbPing', () => ping(db));
 
     if (databaseConnected) {
       return c.json(success({ status: 'ok', uptime: process.uptime(), database: 'connected' }));

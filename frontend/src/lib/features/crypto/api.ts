@@ -1,4 +1,5 @@
 import { request, unwrap } from '$lib/api';
+import { streamAnalysis, type AnalysisStreamHandlers } from '$lib/features/analysis';
 
 export interface CryptoMarket {
 	oracle_id: string;
@@ -52,38 +53,34 @@ export async function getCryptoPositions(
 	return unwrap(response);
 }
 
-export interface CryptoRecommendation {
-	skip?: boolean;
-	message?: string;
-	model?: string;
-	receipt_id?: string;
-	blob_id?: string;
-	public_blob_id?: string | null;
-	content_sha256?: string | null;
-	recommendation?: {
-		asset: string;
-		side: 'Up' | 'Down';
-		strike: number;
-		model_prob: number; // %
-		implied_prob: number | null; // %
-		edge: number; // %
-		has_edge: boolean;
-		f_star: number; // % of bankroll (Kelly)
-		confidence_tier: 'low' | 'medium' | 'high';
-		reasoning: string;
-	};
+/** The model's pick for a crypto market (the polled job result). */
+export interface CryptoPick {
+	asset: string;
+	side: 'Up' | 'Down';
+	strike: number;
+	model_prob: number; // %
+	implied_prob: number | null; // %
+	edge: number; // %
+	has_edge: boolean;
+	f_star: number; // % of bankroll (Kelly)
+	confidence_tier: 'low' | 'medium' | 'high';
+	reasoning: string;
 }
 
-/** Paid/free AI analysis for a crypto market (on-chain access proof + Walrus proof). */
-export async function analyzeCrypto(
+/**
+ * Start a paid/free AI analysis. The heavy work (LLM + Walrus proof) runs in the
+ * background; this returns immediately with the receipt id to poll via
+ * `getAnalysisJob` / `pollAnalysisJob`.
+ */
+export async function startAnalyzeCrypto(
 	oracleId: string,
 	modelId: number,
 	accessDigest: string,
 	strike: number,
 	isUp: boolean,
 	token: string
-): Promise<CryptoRecommendation> {
-	const response = await request<{ data: CryptoRecommendation }>(
+): Promise<{ receipt_id: string; status: string }> {
+	const response = await request<{ data: { receipt_id: string; status: string } }>(
 		`/api/crypto/markets/${encodeURIComponent(oracleId)}/analyze`,
 		{
 			method: 'POST',
@@ -92,4 +89,72 @@ export async function analyzeCrypto(
 		}
 	);
 	return unwrap(response);
+}
+
+// --- Streaming analysis (SSE) ---------------------------------------------------
+
+/** Streaming crypto analysis (SSE) — delegates to the shared stream reader. */
+export function streamAnalyzeCrypto(
+	oracleId: string,
+	modelId: number,
+	accessDigest: string,
+	strike: number,
+	isUp: boolean,
+	token: string,
+	handlers: AnalysisStreamHandlers<CryptoPick>,
+	signal?: AbortSignal
+): Promise<void> {
+	return streamAnalysis<CryptoPick>(
+		`/api/crypto/markets/${encodeURIComponent(oracleId)}/analyze/stream`,
+		{ model_id: modelId, access_tx_digest: accessDigest, strike, is_up: isUp },
+		token,
+		handlers,
+		signal
+	);
+}
+
+// --- Pending-analysis persistence (resume across reload) ------------------------
+
+const PENDING_KEY = 'sheka_pending_crypto_analysis';
+
+export interface PendingAnalysis {
+	oracleId: string;
+	receiptId: string;
+	accessDigest: string;
+	modelId: number;
+	strike: number;
+	isUp: boolean;
+}
+
+function readPending(): Record<string, PendingAnalysis> {
+	try {
+		const raw = localStorage.getItem(PENDING_KEY);
+		return raw ? (JSON.parse(raw) as Record<string, PendingAnalysis>) : {};
+	} catch {
+		return {};
+	}
+}
+
+export function savePendingAnalysis(p: PendingAnalysis): void {
+	try {
+		const all = readPending();
+		all[p.oracleId] = p;
+		localStorage.setItem(PENDING_KEY, JSON.stringify(all));
+	} catch {
+		/* no storage — best effort */
+	}
+}
+
+export function getPendingAnalysis(oracleId: string): PendingAnalysis | null {
+	return readPending()[oracleId] ?? null;
+}
+
+export function clearPendingAnalysis(oracleId: string): void {
+	try {
+		const all = readPending();
+		delete all[oracleId];
+		localStorage.setItem(PENDING_KEY, JSON.stringify(all));
+	} catch {
+		/* best effort */
+	}
 }

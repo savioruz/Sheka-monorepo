@@ -1,7 +1,18 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getMarkets, getModels } from './api';
-	import { getQuota, analyzeMarket, getMyAnalyses, ProofBadge } from '$lib/features/analysis';
+	import {
+		getQuota,
+		getMyAnalyses,
+		getAnalysisJob,
+		pollAnalysisJob,
+		streamAnalyzeMarket,
+		getMarketPending,
+		saveMarketPending,
+		clearMarketPending,
+		ProofBadge
+	} from '$lib/features/analysis';
+	import { ApiError } from '$lib/types';
 	import {
 		fetchUserPositions,
 		marketTab,
@@ -64,6 +75,11 @@
 	let analyzing = $state<string | null>(null);
 	let decrypting = $state<string | null>(null);
 	let expandedReason = $state<Record<string, boolean>>({});
+	// Streaming (SSE): live prose + stage + proof-uploading, keyed by market id.
+	let streamReasoning = $state<Record<string, string>>({});
+	let stage = $state<Record<string, string>>({});
+	let proofPending = $state<Record<string, boolean>>({});
+	let resumed = $state<Record<string, boolean>>({});
 
 	// Browsing state: a clock kept fresh for countdowns + bucket transitions, plus
 	// the sidebar filters (event category + sport + league).
@@ -259,6 +275,7 @@
 		(e.currentTarget as HTMLImageElement).style.display = 'none';
 	}
 
+	// Fresh analysis: pay/claim on-chain, then open the SSE stream with that digest.
 	async function analyze(market: Market) {
 		if (!walletAddress || !sessionToken) {
 			toast.error('Connect your wallet first');
@@ -272,7 +289,7 @@
 		analyzing = market.market_object_id;
 		const toastId = toast.loading(
 			useFree ? 'Claiming free analysis…' : `Paying ${model.price_sui} SUI…`,
-			{ description: 'Approve the wallet popup.' }
+			{ description: 'Approve the wallet popup.', dismissible: false }
 		);
 		try {
 			const tx = useFree
@@ -284,39 +301,140 @@
 				signature,
 				options: { showEffects: true }
 			});
-			toast.loading(`Running ${model.label}…`, { id: toastId });
-			const r = await analyzeMarket(market.market_object_id, model.id, res.digest, sessionToken);
-			if (r.recommendation) {
-				recs[market.market_object_id] = r.recommendation;
-				if (r.blob_id && r.receipt_id) {
-					sealRef[market.market_object_id] = { blobId: r.blob_id, receiptId: r.receipt_id };
-				}
-				if (r.public_blob_id) proofRef[market.market_object_id] = r.public_blob_id;
-				toast.success('Analysis ready', {
-					id: toastId,
-					description: `${model.label}: ${r.recommendation.label}`
-				});
-			} else {
-				toast.error('No result (retry — you were not charged)', {
-					id: toastId,
-					description: r.message ?? ''
-				});
-			}
-			if (sessionToken) {
-				try {
-					freeRemaining = (await getQuota(sessionToken)).free_remaining;
-				} catch {
-					/* ignore */
-				}
-			}
+			toast.loading(`Running ${model.label}…`, { id: toastId, dismissible: false });
+			await runStream(market, model.id, res.digest, toastId);
 		} catch (err) {
 			toast.error('Analyze failed', {
 				id: toastId,
-				description: err instanceof Error ? err.message : String(err)
+				description: err instanceof Error ? err.message : String(err),
+				dismissible: true
 			});
-		} finally {
 			analyzing = null;
 		}
+	}
+
+	// Open the SSE stream (fresh or resumed digest). Streams reasoning → recommendation
+	// → proof, persisting `pending` so a reload can recover it (no second payment).
+	async function runStream(
+		market: Market,
+		modelId: number,
+		accessDigest: string,
+		toastId: string | number
+	) {
+		if (!sessionToken) return;
+		const token = sessionToken;
+		const id = market.market_object_id;
+		const label = modelsList.find((m) => m.id === modelId)?.label ?? 'AI';
+		let receiptId = '';
+
+		streamReasoning[id] = '';
+		delete recs[id];
+		analyzing = id;
+		stage[id] = 'starting';
+		try {
+			await streamAnalyzeMarket(id, modelId, accessDigest, token, {
+				onStatus: (s, rid) => {
+					stage[id] = s;
+					if (rid) {
+						receiptId = rid;
+						saveMarketPending({ marketId: id, receiptId: rid, accessDigest, modelId });
+					}
+				},
+				onReasoning: (t) => {
+					streamReasoning[id] = (streamReasoning[id] ?? '') + t;
+				},
+				onRecommendation: (r) => {
+					recs[id] = r;
+					analyzing = null;
+					proofPending[id] = true;
+					toast.success('Analysis ready', {
+						id: toastId,
+						description: `${label}: ${r.label}`,
+						dismissible: true
+					});
+				},
+				onProof: (p) => {
+					proofPending[id] = false;
+					if (p.public_blob_id) proofRef[id] = p.public_blob_id;
+					if (p.blob_id) sealRef[id] = { blobId: p.blob_id, receiptId };
+					clearMarketPending(id);
+				},
+				onError: (m) => {
+					toast.error('No result (retry — you were not charged)', {
+						id: toastId,
+						description: m,
+						dismissible: true
+					});
+				},
+				onDone: () => clearMarketPending(id)
+			});
+			try {
+				freeRemaining = (await getQuota(token)).free_remaining;
+			} catch {
+				/* ignore */
+			}
+		} catch (err) {
+			const e = err instanceof ApiError ? err : null;
+			if (e?.status === 409) {
+				toast.dismiss(toastId);
+				await refreshOwned();
+			} else {
+				toast.error('Analyze failed', {
+					id: toastId,
+					description: e?.message ?? String(err),
+					dismissible: true
+				});
+			}
+		} finally {
+			if (analyzing === id) analyzing = null;
+			proofPending[id] = false;
+			stage[id] = '';
+		}
+	}
+
+	// Resume an analysis interrupted by a reload — no new payment.
+	async function resumePending(
+		market: Market,
+		pending: NonNullable<ReturnType<typeof getMarketPending>>,
+		token: string
+	) {
+		const id = market.market_object_id;
+		try {
+			const job = await getAnalysisJob<Pick>(pending.receiptId, token);
+			if (job.status === 'done') {
+				if (job.recommendation) recs[id] = job.recommendation;
+				if (job.public_blob_id) proofRef[id] = job.public_blob_id;
+				if (job.blob_id) sealRef[id] = { blobId: job.blob_id, receiptId: pending.receiptId };
+				clearMarketPending(id);
+				return;
+			}
+			if (job.status === 'running' || job.status === 'ready') {
+				if (job.recommendation) recs[id] = job.recommendation;
+				proofPending[id] = true;
+				await pollAnalysisJob<Pick>(pending.receiptId, token, {
+					onReady: (r) => {
+						recs[id] = r;
+					},
+					onProof: (p) => {
+						proofPending[id] = false;
+						if (p.public_blob_id) proofRef[id] = p.public_blob_id;
+						if (p.blob_id) sealRef[id] = { blobId: p.blob_id, receiptId: pending.receiptId };
+						clearMarketPending(id);
+					},
+					onError: () => {
+						proofPending[id] = false;
+					}
+				});
+				return;
+			}
+		} catch (err) {
+			if (err instanceof ApiError && err.status !== 404) return;
+		}
+		const toastId = toast.loading('Resuming analysis…', {
+			description: 'Picking up where you left off.',
+			dismissible: false
+		});
+		await runStream(market, pending.modelId, pending.accessDigest, toastId);
 	}
 
 	// Proves owner-only access: re-fetch the ciphertext from Walrus and decrypt it
@@ -342,6 +460,20 @@
 			decrypting = null;
 		}
 	}
+
+	// Resume analyses interrupted by a reload (saved in localStorage), once per market.
+	$effect(() => {
+		const token = sessionToken;
+		if (!token || markets.length === 0) return;
+		for (const m of markets) {
+			const id = m.market_object_id;
+			if (resumed[id] || recs[id] || analyzing === id) continue;
+			const pending = getMarketPending(id);
+			if (!pending) continue;
+			resumed[id] = true;
+			void resumePending(m, pending, token);
+		}
+	});
 
 	onMount(() => {
 		void load();
@@ -506,7 +638,11 @@
 						</DropdownMenu.RadioGroup>
 					</DropdownMenu.Content>
 				</DropdownMenu.Root>
-				<Button size="sm" onclick={() => analyze(m)} disabled={analyzing === m.market_object_id}>
+				<Button
+					size="sm"
+					onclick={() => analyze(m)}
+					disabled={analyzing === m.market_object_id || proofPending[m.market_object_id]}
+				>
 					{#if analyzing === m.market_object_id}
 						Analyzing…
 					{:else}
@@ -550,6 +686,27 @@
 							>
 						{/if}
 					</div>
+				{/if}
+				{#if proofPending[m.market_object_id] && !proofRef[m.market_object_id] && !sealRef[m.market_object_id]}
+					<p class="mt-1 text-[11px] text-ink-subdued">🔒 Generating verifiable proof on Walrus…</p>
+				{/if}
+			</div>
+		{:else if analyzing === m.market_object_id || streamReasoning[m.market_object_id]}
+			<!-- Live streaming reasoning (ChatGPT-style typewriter). -->
+			<div class="mt-2 bg-primary-subtle/40 p-2 text-xs">
+				<p class="font-semibold text-primary-deep">
+					{#if stage[m.market_object_id] === 'proof'}
+						🔒 <span class="ai-dots">Generating proof</span>
+					{:else}
+						🤖 <span class="ai-dots">Reasoning</span>
+					{/if}
+				</p>
+				{#if streamReasoning[m.market_object_id]}
+					<p class="mt-1 whitespace-pre-line text-ink-muted">
+						{streamReasoning[m.market_object_id]}<span
+							class="ml-0.5 inline-block h-3 w-[2px] animate-pulse bg-ink-muted align-middle"
+						></span>
+					</p>
 				{/if}
 			</div>
 		{:else if walletAddress && (sealRef[m.market_object_id] || proofRef[m.market_object_id])}
