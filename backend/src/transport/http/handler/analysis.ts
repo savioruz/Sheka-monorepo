@@ -70,6 +70,8 @@ export function registerAnalysisRoutes(app: Hono, deps: AnalysisDeps) {
             market_id: r.marketId,
             receipt_id: r.receiptId,
             blob_id: r.blobId,
+            public_blob_id: r.publicBlobId,
+            content_sha256: r.contentSha256,
             model_id: r.modelId,
           })),
       }),

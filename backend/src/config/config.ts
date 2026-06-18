@@ -63,6 +63,22 @@ const configSchema = z.object({
     publisherUrl: z.string().default('https://publisher.walrus-testnet.walrus.space'),
     epochs: z.number().default(5),
   }),
+  // DeepBook Predict (Mysten on-chain prediction markets) — crypto-price binaries.
+  deepbookPredict: z.object({
+    packageId: z
+      .string()
+      .default('0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138'),
+    predictId: z
+      .string()
+      .default('0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a'),
+    registryId: z
+      .string()
+      .default('0x43af14fed5480c20ff77e2263d5f794c35b9fab7e2212903127062f4fe2a6e64'),
+    serverUrl: z.string().default('https://predict-server.testnet.mystenlabs.com'),
+    dusdcType: z
+      .string()
+      .default('0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC'),
+  }),
   database: z.object({
     host: z.string().default('localhost'),
     port: z.number().default(5432),
@@ -153,6 +169,25 @@ export function loadConfig(): Config {
       gatewayUrl: env('WALRUS_GATEWAY_URL', 'https://aggregator.walrus-testnet.walrus.space/v1'),
       publisherUrl: env('WALRUS_PUBLISHER_URL', 'https://publisher.walrus-testnet.walrus.space'),
       epochs: envNum('WALRUS_EPOCHS', 5),
+    },
+    deepbookPredict: {
+      packageId: env(
+        'DEEPBOOK_PREDICT_PACKAGE_ID',
+        '0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138',
+      ),
+      predictId: env(
+        'DEEPBOOK_PREDICT_OBJECT_ID',
+        '0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a',
+      ),
+      registryId: env(
+        'DEEPBOOK_PREDICT_REGISTRY_ID',
+        '0x43af14fed5480c20ff77e2263d5f794c35b9fab7e2212903127062f4fe2a6e64',
+      ),
+      serverUrl: env('DEEPBOOK_PREDICT_SERVER', 'https://predict-server.testnet.mystenlabs.com'),
+      dusdcType: env(
+        'DUSDC_TYPE',
+        '0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC',
+      ),
     },
     database: {
       host: env('DB_POSTGRES_HOST', 'localhost'),

@@ -1,4 +1,5 @@
 import type { Config } from '@config/config';
+import { parseJsonLoose } from '@infras/llm/parse-json';
 import OpenAI from 'openai';
 import type { AnalystResult, GameSnapshot } from './types';
 
@@ -153,17 +154,9 @@ Estimate the home team's win probability and explain your reasoning.`;
         return skipResult(raw);
       }
 
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        // Try to extract JSON from markdown code block
-        const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (match) {
-          parsed = JSON.parse(match[1]);
-        } else {
-          return skipResult(raw);
-        }
+      const parsed = parseJsonLoose(raw);
+      if (parsed === null) {
+        return skipResult(raw);
       }
 
       const validated = validateResult(parsed);

@@ -7,7 +7,9 @@ export const analysisPayments = pgTable('analysis_payments', {
   walletAddress: text('wallet_address').notNull(),
   modelId: integer('model_id').notNull(),
   marketId: text('market_id'),
-  blobId: text('blob_id'),
+  blobId: text('blob_id'), // Seal-encrypted full analysis (owner-only)
+  publicBlobId: text('public_blob_id'), // plaintext, self-verifiable proof summary (no reasoning)
+  contentSha256: text('content_sha256'), // sha256 of the canonical public proof bundle
   status: text('status').default('pending').notNull(), // 'pending' | 'done'
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
