@@ -5,6 +5,8 @@ export interface OwnedAnalysis {
 	market_id: string;
 	receipt_id: string;
 	blob_id: string;
+	public_blob_id: string | null;
+	content_sha256: string | null;
 	model_id: number;
 }
 

@@ -191,6 +191,8 @@ export interface Recommendation {
 	model?: string;
 	receipt_id?: string;
 	blob_id?: string | null;
+	public_blob_id?: string | null;
+	content_sha256?: string | null;
 	recommendation?: {
 		outcome: number;
 		label: string;
