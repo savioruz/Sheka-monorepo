@@ -18,6 +18,18 @@ Respond ONLY with strict JSON: {"up_probability": <number 0..1>, "confidence_tie
 
 Be humble: short-horizon crypto direction is close to a random walk. Anchor near 0.5 unless the strike is far from spot relative to the time remaining, or there is strong, persistent momentum. Never claim certainty.`;
 
+// Streaming variant: prose first (so it streams like a chat), then a delimiter +
+// the compact machine-readable JSON. The prose IS the reasoning shown to the user.
+const STREAM_DELIM = '===JSON===';
+const SYSTEM_PROMPT_STREAM = `You are a calibrated quantitative crypto analyst estimating the probability that an asset's spot price will be AT OR ABOVE a given strike at a given expiry.
+
+First, write a concise 2-4 sentence analysis citing the specific signals: spot vs strike (distance), time remaining, and recent 24h/7d momentum. Be humble — short-horizon crypto direction is close to a random walk; anchor near 0.5 unless the strike is far from spot relative to time, or momentum is strong and persistent. Never claim certainty.
+
+Then output a line containing exactly:
+${STREAM_DELIM}
+followed by a single-line JSON object and nothing after it:
+{"up_probability": <number 0..1>, "confidence_tier": "low"|"medium"|"high"}`;
+
 export interface CryptoMarketData {
   price: number | null;
   change24h: number | null;
@@ -90,22 +102,40 @@ export function createCryptoAnalyst(deps: { config: Config; logger: Logger }) {
     return { upProbability: p, confidenceTier: tier, reasoning };
   }
 
-  // Estimate P(asset ≥ strike at expiry) from spot + recent momentum.
-  async function analyze(
-    input: { asset: string; spot: number | null; strike: number; expiryMs: number },
-    model?: string,
-  ): Promise<CryptoAnalystResult | null> {
-    const md = await marketData(input.asset);
+  type AnalyzeInput = { asset: string; spot: number | null; strike: number; expiryMs: number };
+
+  function buildPrompt(input: AnalyzeInput, md: CryptoMarketData): string {
     const spot = input.spot ?? md.price;
     const hours = (input.expiryMs - Date.now()) / 3_600_000;
-    const prompt = `Asset: ${input.asset}
+    return `Asset: ${input.asset}
 Current spot: ${spot != null ? `$${spot}` : 'unknown'}
 Strike: $${input.strike}
 Time to expiry: ${hours.toFixed(1)} hours
 24h change: ${md.change24h != null ? `${md.change24h.toFixed(2)}%` : 'n/a'}
 7d change: ${md.change7d != null ? `${md.change7d.toFixed(2)}%` : 'n/a'}
 
-Estimate the probability that ${input.asset} will be AT OR ABOVE $${input.strike} at expiry. Return JSON only.`;
+Estimate the probability that ${input.asset} will be AT OR ABOVE $${input.strike} at expiry.`;
+  }
+
+  // Validate the probability + tier only (used by the streaming path where the
+  // reasoning is the streamed prose, not a JSON field).
+  function validateProbTier(
+    obj: unknown,
+  ): { upProbability: number; confidenceTier: 'low' | 'medium' | 'high' } | null {
+    if (typeof obj !== 'object' || obj === null) return null;
+    const o = obj as Record<string, unknown>;
+    let p = Number(o.up_probability);
+    if (Number.isNaN(p)) return null;
+    p = Math.min(1, Math.max(0, p));
+    const tier = o.confidence_tier;
+    if (tier !== 'low' && tier !== 'medium' && tier !== 'high') return null;
+    return { upProbability: p, confidenceTier: tier };
+  }
+
+  // Estimate P(asset ≥ strike at expiry) from spot + recent momentum.
+  async function analyze(input: AnalyzeInput, model?: string): Promise<CryptoAnalystResult | null> {
+    const md = await marketData(input.asset);
+    const prompt = `${buildPrompt(input, md)} Return JSON only.`;
 
     try {
       const response = await client.chat.completions.create({
@@ -132,7 +162,78 @@ Estimate the probability that ${input.asset} will be AT OR ABOVE $${input.strike
     }
   }
 
-  return { analyze };
+  /**
+   * Streaming analysis: emits the prose reasoning token-by-token via `onReasoning`
+   * (for a ChatGPT-style typewriter), then parses the trailing JSON for the
+   * probability + tier. The prose becomes the result's `reasoning`.
+   */
+  async function analyzeStream(
+    input: AnalyzeInput,
+    model: string | undefined,
+    onReasoning: (delta: string) => void | Promise<void>,
+  ): Promise<CryptoAnalystResult | null> {
+    const md = await marketData(input.asset);
+    const prompt = buildPrompt(input, md);
+
+    try {
+      const stream = await client.chat.completions.create({
+        model: model ?? config.openrouter.model,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT_STREAM },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.2,
+        max_tokens: 700,
+        stream: true,
+      });
+
+      let full = '';
+      let emitted = 0; // chars of prose already streamed to the client
+      let delimFound = false;
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? '';
+        if (!delta) continue;
+        full += delta;
+        if (delimFound) continue; // past the delimiter — just accumulate the JSON tail
+        const at = full.indexOf(STREAM_DELIM);
+        if (at !== -1) {
+          if (at > emitted) await onReasoning(full.slice(emitted, at));
+          emitted = at;
+          delimFound = true;
+        } else {
+          // Hold back the last DELIM-length chars so a partial "===JSON===" marker
+          // never leaks into the streamed prose.
+          const safeEnd = Math.max(emitted, full.length - STREAM_DELIM.length);
+          if (safeEnd > emitted) {
+            await onReasoning(full.slice(emitted, safeEnd));
+            emitted = safeEnd;
+          }
+        }
+      }
+      // No delimiter ever arrived — flush the held-back tail as prose.
+      if (!delimFound && full.length > emitted) await onReasoning(full.slice(emitted));
+
+      const delimAt = full.indexOf(STREAM_DELIM);
+      const prose = (delimAt === -1 ? full : full.slice(0, delimAt)).trim();
+      const jsonRaw = delimAt === -1 ? full : full.slice(delimAt + STREAM_DELIM.length);
+      const v = validateProbTier(parseJsonLoose(jsonRaw));
+      if (!v) return null;
+      return {
+        upProbability: v.upProbability,
+        confidenceTier: v.confidenceTier,
+        reasoning: prose || 'No analysis text returned.',
+        marketData: md,
+      };
+    } catch (err) {
+      logger.warn(
+        { error: err instanceof Error ? err.message : String(err) },
+        'crypto analyzeStream failed',
+      );
+      return null;
+    }
+  }
+
+  return { analyze, analyzeStream };
 }
 
 export type CryptoAnalyst = ReturnType<typeof createCryptoAnalyst>;

@@ -114,25 +114,53 @@ export function createPredictClient(deps: PredictClientDeps) {
     return markets.sort((a, b) => a.expiry - b.expiry); // soonest expiry first
   }
 
-  // Open positions for a manager (minted minus already-redeemed).
+  // Open positions for a manager = minted NET of redeemed, by quantity.
+  //
+  // The predict-server keeps every minted + redeemed event. Netting by a boolean
+  // key (oracle:strike:is_up) is wrong: if a wallet holds several positions on the
+  // same oracle/strike/side, or partially redeems, a single redemption would hide
+  // the still-open remainder (the "my unredeemed position disappeared" bug). So we
+  // subtract redeemed QUANTITY from minted QUANTITY per key and surface what's left.
   async function listPositions(managerId: string): Promise<CryptoPosition[]> {
     const data = await fetchJson<{ minted?: RawMinted[]; redeemed?: RawMinted[] }>(
       `/managers/${managerId}/positions`,
     );
     if (!data?.minted) return [];
     const key = (m: RawMinted) => `${m.oracle_id}:${m.strike}:${m.is_up}`;
-    const redeemed = new Set((data.redeemed ?? []).map(key));
-    return data.minted
-      .filter((m) => !redeemed.has(key(m)))
-      .map((m) => ({
-        oracle_id: m.oracle_id,
-        strike: Number(m.strike) / PRICE_SCALE,
-        is_up: m.is_up,
-        expiry: Number(m.expiry),
-        quantity: Number(m.quantity) / DUSDC_SCALE,
-        cost: Number(m.cost) / DUSDC_SCALE,
-      }))
-      .sort((a, b) => a.expiry - b.expiry);
+
+    const redeemedQty = new Map<string, number>();
+    for (const r of data.redeemed ?? []) {
+      redeemedQty.set(key(r), (redeemedQty.get(key(r)) ?? 0) + Number(r.quantity));
+    }
+
+    // Aggregate minted by key (base units), keeping the first entry for its metadata.
+    const agg = new Map<string, { sample: RawMinted; qty: number; cost: number }>();
+    for (const m of data.minted) {
+      const k = key(m);
+      const a = agg.get(k);
+      if (a) {
+        a.qty += Number(m.quantity);
+        a.cost += Number(m.cost);
+      } else {
+        agg.set(k, { sample: m, qty: Number(m.quantity), cost: Number(m.cost) });
+      }
+    }
+
+    const positions: CryptoPosition[] = [];
+    for (const [k, a] of agg) {
+      const netQty = a.qty - (redeemedQty.get(k) ?? 0);
+      if (netQty < 1) continue; // fully redeemed/settled (ignore sub-base-unit dust)
+      const costShare = a.qty > 0 ? (a.cost * netQty) / a.qty : a.cost; // proportional
+      positions.push({
+        oracle_id: a.sample.oracle_id,
+        strike: Number(a.sample.strike) / PRICE_SCALE,
+        is_up: a.sample.is_up,
+        expiry: Number(a.sample.expiry),
+        quantity: netQty / DUSDC_SCALE,
+        cost: costShare / DUSDC_SCALE,
+      });
+    }
+    return positions.sort((a, b) => a.expiry - b.expiry);
   }
 
   // Read-only price quote for an Up/Down position via `get_trade_amounts`

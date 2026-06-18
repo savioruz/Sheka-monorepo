@@ -1,4 +1,5 @@
 import type { Ingestor } from '@domains/prediction/ingestor';
+import { traced } from '@infras/otel/otel';
 import type { Hono } from 'hono';
 import { error, success } from '../response';
 
@@ -20,11 +21,9 @@ export function registerNewsRoutes(app: Hono, deps: NewsDeps) {
     const league = c.req.query('league')?.trim() || undefined;
 
     try {
-      const { articles, hasMore, total } = await ingestor.fetchRecentNews(offset, limit, {
-        search,
-        sport,
-        league,
-      });
+      const { articles, hasMore, total } = await traced('news.fetchRecent', () =>
+        ingestor.fetchRecentNews(offset, limit, { search, sport, league }),
+      );
       return c.json(
         success({
           articles: articles.map((a) => ({
@@ -49,7 +48,7 @@ export function registerNewsRoutes(app: Hono, deps: NewsDeps) {
   // Public: one article's detail (adds image + outbound ESPN link).
   app.get('/api/news/:id', async (c) => {
     const id = c.req.param('id');
-    const a = await ingestor.fetchNewsDetail(id);
+    const a = await traced('news.fetchDetail', () => ingestor.fetchNewsDetail(id));
     if (!a) return c.json(error('not_found', 'Article not found'), 404);
     return c.json(
       success({

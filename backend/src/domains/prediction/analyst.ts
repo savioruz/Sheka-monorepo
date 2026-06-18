@@ -31,6 +31,19 @@ Confidence guidelines:
 
 Return JSON only, no markdown, no preamble.`;
 
+// Streaming variant: prose first (streams like a chat), then a delimiter + the
+// compact machine-readable JSON. The prose IS the reasoning shown to the user.
+const STREAM_DELIM = '===JSON===';
+const SYSTEM_PROMPT_STREAM = `You are a sports prediction analyst estimating the probability of each outcome — home win, draw, away win — from the context provided (teams, score, injuries, key player stats, recent news, venue).
+
+First, write a concise rationale (max ~60 words) citing the specific signals (injuries on both sides, news/form, home advantage, current score) that drive your estimate. Finish your sentences. Only claim "high" confidence when multiple independent signals agree.
+
+Then output a line containing exactly:
+${STREAM_DELIM}
+followed by a single-line JSON object and nothing after it:
+{"home_win_probability": <0..1>, "draw_probability": <0..1, use 0 if a draw is impossible>, "away_win_probability": <0..1>, "confidence_tier": "low"|"medium"|"high"}
+The three probabilities should sum to approximately 1.`;
+
 export function createAnalyst(deps: AnalystDeps) {
   const { config } = deps;
 
@@ -105,7 +118,14 @@ Estimate the home team's win probability and explain your reasoning.`;
     };
   }
 
-  function validateResult(obj: unknown): AnalystResult | null {
+  // Normalize the 3-way probabilities + tier from a parsed object (no reasoning —
+  // shared by the JSON path and the streaming path where reasoning is the prose).
+  function normalizeProbsTier(obj: unknown): {
+    homeWinProbability: number;
+    drawProbability: number;
+    awayWinProbability: number;
+    confidenceTier: 'low' | 'medium' | 'high';
+  } | null {
     if (typeof obj !== 'object' || obj === null) return null;
     const o = obj as Record<string, unknown>;
 
@@ -124,17 +144,20 @@ Estimate the home team's win probability and explain your reasoning.`;
     const tier = o.confidence_tier;
     if (tier !== 'low' && tier !== 'medium' && tier !== 'high') return null;
 
-    const reasoning = String(o.reasoning ?? '');
-    if (!reasoning) return null;
-
     return {
       homeWinProbability: h,
       drawProbability: d,
       awayWinProbability: a,
       confidenceTier: tier,
-      reasoning,
-      skip: false,
     };
+  }
+
+  function validateResult(obj: unknown): AnalystResult | null {
+    const probs = normalizeProbsTier(obj);
+    if (!probs) return null;
+    const reasoning = String((obj as Record<string, unknown>).reasoning ?? '');
+    if (!reasoning) return null;
+    return { ...probs, reasoning, skip: false };
   }
 
   async function analyzeGame(game: GameSnapshot, model?: string): Promise<AnalystResult> {
@@ -171,7 +194,64 @@ Estimate the home team's win probability and explain your reasoning.`;
     }
   }
 
-  return { analyzeGame };
+  /**
+   * Streaming analysis: emits the prose reasoning token-by-token via `onReasoning`
+   * (ChatGPT-style typewriter), then parses the trailing JSON for the 3-way probs +
+   * tier. The prose becomes the result's `reasoning`. Returns null on failure.
+   */
+  async function analyzeGameStream(
+    game: GameSnapshot,
+    model: string | undefined,
+    onReasoning: (delta: string) => void | Promise<void>,
+  ): Promise<AnalystResult | null> {
+    try {
+      const stream = await client.chat.completions.create({
+        model: model ?? config.openrouter.model,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT_STREAM },
+          { role: 'user', content: buildUserPrompt(game) },
+        ],
+        temperature: 0.2,
+        max_tokens: 1024,
+        stream: true,
+      });
+
+      let full = '';
+      let emitted = 0;
+      let delimFound = false;
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? '';
+        if (!delta) continue;
+        full += delta;
+        if (delimFound) continue;
+        const at = full.indexOf(STREAM_DELIM);
+        if (at !== -1) {
+          if (at > emitted) await onReasoning(full.slice(emitted, at));
+          emitted = at;
+          delimFound = true;
+        } else {
+          // Hold back the last DELIM-length chars so a partial marker never leaks.
+          const safeEnd = Math.max(emitted, full.length - STREAM_DELIM.length);
+          if (safeEnd > emitted) {
+            await onReasoning(full.slice(emitted, safeEnd));
+            emitted = safeEnd;
+          }
+        }
+      }
+      if (!delimFound && full.length > emitted) await onReasoning(full.slice(emitted));
+
+      const delimAt = full.indexOf(STREAM_DELIM);
+      const prose = (delimAt === -1 ? full : full.slice(0, delimAt)).trim();
+      const jsonRaw = delimAt === -1 ? full : full.slice(delimAt + STREAM_DELIM.length);
+      const probs = normalizeProbsTier(parseJsonLoose(jsonRaw));
+      if (!probs) return null;
+      return { ...probs, reasoning: prose || 'No analysis text returned.', skip: false };
+    } catch {
+      return null;
+    }
+  }
+
+  return { analyzeGame, analyzeGameStream };
 }
 
 export type Analyst = ReturnType<typeof createAnalyst>;

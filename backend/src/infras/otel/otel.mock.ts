@@ -12,6 +12,7 @@ export function makeMockOtel(): { otel: MockOtel; scope: MockScope } {
     addEvent: mock(),
     setAttribute: mock(),
     setAttributes: mock(),
+    setName: mock(),
     end: mock(),
     traceError: mock(),
     traceIfError: mock(),

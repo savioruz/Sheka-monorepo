@@ -16,6 +16,7 @@ export interface Otel {
 
 export interface Scope {
   end(): void;
+  setName(name: string): void;
   traceError(error: Error): void;
   traceIfError(error: Error | null | undefined): void;
   addEvent(name: string): void;
@@ -28,6 +29,10 @@ class ScopeImpl implements Scope {
 
   end(): void {
     this.span.end();
+  }
+
+  setName(name: string): void {
+    this.span.updateName(name);
   }
 
   traceError(error: Error): void {
@@ -134,6 +139,7 @@ class OtelImpl implements Otel {
 function createNoopOtel(): Otel {
   const noopScope: Scope = {
     end: () => {},
+    setName: () => {},
     traceError: () => {},
     traceIfError: () => {},
     addEvent: () => {},
@@ -155,4 +161,23 @@ export function createOtel(config: Config, logger: Logger): Otel {
   }
 
   return new OtelImpl(config, logger);
+}
+
+/**
+ * Run an async op inside a child span nested under the currently-active span.
+ * Records elapsed time + errors. Use to break a slow handler into measurable
+ * steps in Jaeger (no-op shape if no active span / tracing disabled).
+ */
+export async function traced<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  return trace.getTracer('sheka').startActiveSpan(name, async (span) => {
+    try {
+      return await fn();
+    } catch (err) {
+      span.recordException(err instanceof Error ? err : new Error(String(err)));
+      span.setStatus({ code: SpanStatusCode.ERROR });
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }

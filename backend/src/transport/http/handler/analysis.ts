@@ -2,7 +2,9 @@ import type { Config } from '@config/config';
 import type { Database } from '@db/index';
 import { analysisPayments } from '@db/schema/analysis-payments';
 import { models } from '@db/schema/models';
+import type { AnalysisJobs } from '@domains/analysis/jobs';
 import type { AnalysisService } from '@domains/analysis/service';
+import { traced } from '@infras/otel/otel';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import type { Hono } from 'hono';
 import { error, success } from '../response';
@@ -11,18 +13,17 @@ export interface AnalysisDeps {
   config: Config;
   db: Database;
   analysisService: AnalysisService;
+  analysisJobs: AnalysisJobs;
 }
 
 export function registerAnalysisRoutes(app: Hono, deps: AnalysisDeps) {
-  const { config, db, analysisService } = deps;
+  const { config, db, analysisService, analysisJobs } = deps;
 
   // Public: the model catalog for the analyze dropdown.
   app.get('/api/models', async (c) => {
-    const rows = await db
-      .select()
-      .from(models)
-      .where(eq(models.active, true))
-      .orderBy(asc(models.sort));
+    const rows = await traced('models.list', () =>
+      db.select().from(models).where(eq(models.active, true)).orderBy(asc(models.sort)),
+    );
     return c.json(
       success({
         models: rows.map((m) => ({
@@ -43,7 +44,7 @@ export function registerAnalysisRoutes(app: Hono, deps: AnalysisDeps) {
   app.get('/api/analysis/quota', async (c) => {
     const walletAddress = c.get('walletAddress') as string | undefined;
     if (!walletAddress) return c.json(error('unauthorized', 'Wallet not authenticated'), 401);
-    const used = await analysisService.freeUsed(walletAddress);
+    const used = await traced('quota.freeUsed', () => analysisService.freeUsed(walletAddress));
     const limit = config.analysis.freeLimit;
     return c.json(
       success({ free_used: used, free_limit: limit, free_remaining: Math.max(0, limit - used) }),
@@ -55,13 +56,18 @@ export function registerAnalysisRoutes(app: Hono, deps: AnalysisDeps) {
   app.get('/api/analysis/mine', async (c) => {
     const walletAddress = c.get('walletAddress') as string | undefined;
     if (!walletAddress) return c.json(error('unauthorized', 'Wallet not authenticated'), 401);
-    const rows = await db
-      .select()
-      .from(analysisPayments)
-      .where(
-        and(eq(analysisPayments.walletAddress, walletAddress), eq(analysisPayments.status, 'done')),
-      )
-      .orderBy(desc(analysisPayments.createdAt));
+    const rows = await traced('analyses.mine', () =>
+      db
+        .select()
+        .from(analysisPayments)
+        .where(
+          and(
+            eq(analysisPayments.walletAddress, walletAddress),
+            eq(analysisPayments.status, 'done'),
+          ),
+        )
+        .orderBy(desc(analysisPayments.createdAt)),
+    );
     return c.json(
       success({
         analyses: rows
@@ -74,6 +80,29 @@ export function registerAnalysisRoutes(app: Hono, deps: AnalysisDeps) {
             content_sha256: r.contentSha256,
             model_id: r.modelId,
           })),
+      }),
+    );
+  });
+
+  // Auth: poll a background analysis job by its receipt id (job+poll flow). Returns
+  // the recommendation as soon as it's ready, then the Walrus proof refs when stored.
+  app.get('/api/analysis/job/:receiptId', async (c) => {
+    const walletAddress = c.get('walletAddress') as string | undefined;
+    if (!walletAddress) return c.json(error('unauthorized', 'Wallet not authenticated'), 401);
+    const receiptId = c.req.param('receiptId');
+    const job = analysisJobs.get(receiptId);
+    if (!job) return c.json(error('not_found', 'No such analysis job'), 404);
+    if (job.walletAddress !== walletAddress) {
+      return c.json(error('forbidden', 'Not your analysis'), 403);
+    }
+    return c.json(
+      success({
+        status: job.status,
+        recommendation: job.recommendation ?? null,
+        public_blob_id: job.publicBlobId ?? null,
+        blob_id: job.blobId ?? null,
+        content_sha256: job.contentSha256 ?? null,
+        message: job.message ?? null,
       }),
     );
   });

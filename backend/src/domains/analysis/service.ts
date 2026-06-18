@@ -3,6 +3,7 @@ import type { Config } from '@config/config';
 import type { Database } from '@db/index';
 import { models } from '@db/schema/models';
 import type { Logger } from '@infras/logger/logger';
+import { traced } from '@infras/otel/otel';
 import { SealClient } from '@mysten/seal';
 import { SuiClient } from '@mysten/sui/client';
 
@@ -90,7 +91,9 @@ export function createAnalysisService(deps: AnalysisServiceDeps) {
       // The tx was just executed client-side; our RPC node may not have indexed
       // it yet. Wait for propagation before reading it.
       try {
-        await client.waitForTransaction({ digest, timeout: 20_000, pollInterval: 1_000 });
+        // Poll faster than the 1s default so we return as soon as our node indexes
+        // the just-submitted access tx (this otherwise dominates analyze latency).
+        await client.waitForTransaction({ digest, timeout: 20_000, pollInterval: 250 });
       } catch {
         /* fall through — getTransactionBlock will surface a clear error if truly missing */
       }
@@ -182,19 +185,28 @@ export function createAnalysisService(deps: AnalysisServiceDeps) {
   ): Promise<{ publicBlobId: string | null; blobId: string | null; contentSha256: string | null }> {
     try {
       const contentSha256 = sha256Hex(canonicalize(publicBundle));
-      const publicBlobId = await putBlob(
-        new TextEncoder().encode(
-          JSON.stringify({ ...publicBundle, content_sha256: contentSha256 }),
-        ),
-      );
 
-      const { encryptedObject } = await sealClient.encrypt({
-        threshold: 1,
-        packageId: config.analysis.packageId,
-        id: receiptId,
-        data: new TextEncoder().encode(JSON.stringify(privatePayload)),
-      });
-      const blobId = await putBlob(encryptedObject);
+      // The two Walrus uploads are independent — the public plaintext blob and the
+      // Seal-encrypt-then-upload of the private blob. Run them concurrently so the
+      // (slow) testnet publisher latency overlaps instead of stacking.
+      const [publicBlobId, blobId] = await Promise.all([
+        traced('storeProof.putPublic', () =>
+          putBlob(
+            new TextEncoder().encode(
+              JSON.stringify({ ...publicBundle, content_sha256: contentSha256 }),
+            ),
+          ),
+        ),
+        traced('storeProof.encryptPutPrivate', async () => {
+          const { encryptedObject } = await sealClient.encrypt({
+            threshold: 1,
+            packageId: config.analysis.packageId,
+            id: receiptId,
+            data: new TextEncoder().encode(JSON.stringify(privatePayload)),
+          });
+          return putBlob(encryptedObject);
+        }),
+      ]);
 
       logger.info(
         { receiptId, publicBlobId, blobId, contentSha256 },

@@ -1,5 +1,6 @@
 import type { Ingestor } from '@domains/prediction/ingestor';
 import type { GameSnapshot } from '@domains/prediction/types';
+import { traced } from '@infras/otel/otel';
 import type { Hono } from 'hono';
 import { error, success } from '../response';
 
@@ -64,7 +65,7 @@ export function registerGamesRoutes(app: Hono, deps: GamesDeps) {
 
   app.get('/api/games', async (c) => {
     try {
-      const games = await ingestor.fetchGames();
+      const games = await traced('games.fetch', () => ingestor.fetchGames());
       const summaries = games.map(toGameSummary);
       return c.json(success({ games: summaries, fetched_at: new Date().toISOString() }));
     } catch (err) {
