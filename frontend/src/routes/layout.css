@@ -101,3 +101,25 @@
 		@apply font-sans;
 	}
 }
+
+.ai-dots::after {
+	content: '';
+	animation: ai-ellipsis 1.4s steps(1, end) infinite;
+}
+@keyframes ai-ellipsis {
+	0% {
+		content: '';
+	}
+	25% {
+		content: '.';
+	}
+	50% {
+		content: '..';
+	}
+	75% {
+		content: '...';
+	}
+	100% {
+		content: '';
+	}
+}

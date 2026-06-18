@@ -9,11 +9,14 @@
 	import {
 		getQuota,
 		getMyAnalyses,
+		getAnalysisJob,
+		pollAnalysisJob,
 		buildClaimFreeTransaction,
 		buildPurchaseTransaction,
 		decryptAnalysis,
 		ProofBadge
 	} from '$lib/features/analysis';
+	import { ApiError } from '$lib/types';
 	import { toast } from 'svelte-sonner';
 	import {
 		quoteTrade,
@@ -23,7 +26,14 @@
 		DUSDC_SCALE,
 		type MarketKeyInput
 	} from './predict';
-	import { analyzeCrypto, type CryptoMarket, type CryptoRecommendation } from './api';
+	import {
+		streamAnalyzeCrypto,
+		getPendingAnalysis,
+		savePendingAnalysis,
+		clearPendingAnalysis,
+		type CryptoMarket,
+		type CryptoPick
+	} from './api';
 
 	const DUSDC_TYPE = import.meta.env.VITE_DUSDC_TYPE ?? '';
 
@@ -50,11 +60,14 @@
 	let quoteSeq = 0;
 
 	// --- AI analysis (same on-chain paid/free gate + Walrus proof as sports) ---
-	type Pick = NonNullable<CryptoRecommendation['recommendation']>;
+	type Pick = CryptoPick;
 	let modelsList = $state<Model[]>([]);
 	let selectedModelId = $state(0);
 	let freeRemaining = $state<number | null>(null);
 	let analyzing = $state(false);
+	let proofPending = $state(false); // recommendation shown; Walrus proof still uploading
+	let streamReasoning = $state(''); // live token-by-token prose while analyzing
+	let stage = $state(''); // '' | 'starting' | 'reasoning' | 'proof'
 	let rec = $state<Pick | null>(null);
 	let proofBlobId = $state<string | null>(null);
 	let expandedReason = $state(false);
@@ -81,6 +94,8 @@
 		expandedReason = false;
 		sealRef = null;
 		decrypted = false;
+		streamReasoning = '';
+		stage = '';
 	});
 
 	// Load the model price list + free quota once the dialog opens, and re-surface
@@ -121,6 +136,20 @@
 	// Seed the strike when the dialog opens on a market.
 	$effect(() => {
 		if (open && market?.spot) strike = Math.round(market.spot / 100) * 100;
+	});
+
+	// Resume an analysis interrupted by a reload (saved in localStorage) — once per
+	// market open. No new payment: it polls the job, or re-streams the saved digest.
+	let resumedFor = $state<string | null>(null);
+	$effect(() => {
+		if (!open) return;
+		const token = sessionToken;
+		const oracleId = market?.oracle_id;
+		if (!token || !oracleId || resumedFor === oracleId || analyzing || rec) return;
+		const pending = getPendingAnalysis(oracleId);
+		if (!pending) return;
+		resumedFor = oracleId;
+		void resumePending(pending, token);
 	});
 
 	const key = $derived<MarketKeyInput | null>(
@@ -205,13 +234,13 @@
 		}
 	}
 
-	// Analyze the exact strike + side the user picked in this dialog.
+	// Fresh analysis: pay/claim on-chain, then open the SSE stream with that digest.
 	async function analyze() {
 		if (!walletAddress || !sessionToken) {
 			toast.error('Connect your wallet first');
 			return;
 		}
-		if (!market || analyzing) return;
+		if (!market || analyzing || proofPending) return;
 		const model = selectedModel;
 		if (!model) return;
 
@@ -219,51 +248,173 @@
 		analyzing = true;
 		const toastId = toast.loading(
 			useFree ? 'Claiming free analysis…' : `Paying ${model.price_sui} SUI…`,
-			{ description: 'Approve the wallet popup.' }
+			{ description: 'Approve the wallet popup.', dismissible: false }
 		);
 		try {
 			const tx = useFree
 				? buildClaimFreeTransaction(model.id)
 				: buildPurchaseTransaction(model.id, model.price_mist);
 			const res = await exec(tx);
-			toast.loading(`Running ${model.label}…`, { id: toastId });
-			const r = await analyzeCrypto(
-				market.oracle_id,
-				model.id,
-				res.digest,
-				strike,
-				isUp,
-				sessionToken
-			);
-			if (r.recommendation) {
-				rec = r.recommendation;
-				proofBlobId = r.public_blob_id ?? null;
-				sealRef = r.blob_id && r.receipt_id ? { blobId: r.blob_id, receiptId: r.receipt_id } : null;
-				decrypted = false;
-				toast.success('Analysis ready', {
-					id: toastId,
-					description: `${model.label}: ${r.recommendation.model_prob}% ${r.recommendation.side}`
-				});
-			} else {
-				toast.error('No result (retry — you were not charged)', {
-					id: toastId,
-					description: r.message ?? ''
-				});
-			}
-			if (sessionToken) {
-				try {
-					freeRemaining = (await getQuota(sessionToken)).free_remaining;
-				} catch {
-					/* ignore */
-				}
-			}
+			toast.loading(`Running ${model.label}…`, { id: toastId, dismissible: false });
+			await runStream(res.digest, model.id, strike, isUp, toastId);
 		} catch (err) {
+			// Wallet/tx failure (the stream itself is handled inside runStream).
 			toast.error('Analyze failed', {
 				id: toastId,
-				description: err instanceof Error ? err.message : String(err)
+				description: err instanceof Error ? err.message : String(err),
+				dismissible: true
 			});
+			analyzing = false;
+		}
+	}
+
+	// Open the SSE stream for an access digest (fresh, or a saved one on resume —
+	// resume re-uses the same receipt, so no second payment). Streams reasoning →
+	// recommendation → proof, persisting `pending` so a reload can recover it.
+	async function runStream(
+		accessDigest: string,
+		modelId: number,
+		strikeVal: number,
+		isUpVal: boolean,
+		toastId: string | number
+	) {
+		if (!sessionToken || !market) return;
+		const token = sessionToken;
+		const oracleId = market.oracle_id;
+		const label = modelsList.find((m) => m.id === modelId)?.label ?? 'AI';
+		let receiptId = '';
+
+		streamReasoning = '';
+		rec = null;
+		proofBlobId = null;
+		sealRef = null;
+		decrypted = false;
+		analyzing = true;
+		stage = 'starting';
+		try {
+			await streamAnalyzeCrypto(oracleId, modelId, accessDigest, strikeVal, isUpVal, token, {
+				onStatus: (s, rid) => {
+					stage = s;
+					if (rid) {
+						receiptId = rid;
+						savePendingAnalysis({
+							oracleId,
+							receiptId: rid,
+							accessDigest,
+							modelId,
+							strike: strikeVal,
+							isUp: isUpVal
+						});
+					}
+				},
+				onReasoning: (t) => {
+					streamReasoning += t;
+				},
+				onRecommendation: (r) => {
+					rec = r;
+					analyzing = false;
+					proofPending = true;
+					toast.success('Analysis ready', {
+						id: toastId,
+						description: `${label}: ${r.model_prob}% ${r.side}`,
+						dismissible: true
+					});
+				},
+				onProof: (p) => {
+					proofPending = false;
+					proofBlobId = p.public_blob_id;
+					sealRef = p.blob_id ? { blobId: p.blob_id, receiptId } : null;
+					clearPendingAnalysis(oracleId);
+				},
+				onError: (message) => {
+					toast.error('No result (retry — you were not charged)', {
+						id: toastId,
+						description: message,
+						dismissible: true
+					});
+				},
+				onDone: () => clearPendingAnalysis(oracleId)
+			});
+			try {
+				freeRemaining = (await getQuota(token)).free_remaining;
+			} catch {
+				/* ignore */
+			}
+		} catch (err) {
+			const e = err instanceof ApiError ? err : null;
+			if (e?.status === 409) {
+				// Already finished or running for this receipt — recover the result.
+				toast.dismiss(toastId);
+				await recoverOwned(oracleId);
+			} else {
+				toast.error('Analyze failed', {
+					id: toastId,
+					description: e?.message ?? String(err),
+					dismissible: true
+				});
+			}
 		} finally {
 			analyzing = false;
+			proofPending = false;
+			stage = '';
+		}
+	}
+
+	// Resume an in-flight/failed analysis saved before a reload — no new payment.
+	async function resumePending(pending: ReturnType<typeof getPendingAnalysis>, token: string) {
+		if (!pending) return;
+		try {
+			const job = await getAnalysisJob<Pick>(pending.receiptId, token);
+			if (job.status === 'done') {
+				if (job.recommendation) rec = job.recommendation;
+				proofBlobId = job.public_blob_id;
+				sealRef = job.blob_id ? { blobId: job.blob_id, receiptId: pending.receiptId } : null;
+				clearPendingAnalysis(pending.oracleId);
+				return;
+			}
+			if (job.status === 'running' || job.status === 'ready') {
+				if (job.recommendation) rec = job.recommendation;
+				proofPending = true;
+				await pollAnalysisJob<Pick>(pending.receiptId, token, {
+					onReady: (r) => {
+						rec = r;
+					},
+					onProof: (p) => {
+						proofPending = false;
+						proofBlobId = p.public_blob_id;
+						sealRef = p.blob_id ? { blobId: p.blob_id, receiptId: pending.receiptId } : null;
+						clearPendingAnalysis(pending.oracleId);
+					},
+					onError: () => {
+						proofPending = false;
+					}
+				});
+				return;
+			}
+			// status 'error' → fall through to re-stream.
+		} catch (err) {
+			// 404 = job gone (server restart) and not persisted → re-stream below.
+			if (err instanceof ApiError && err.status !== 404) return; // 401 handled globally
+		}
+		const toastId = toast.loading('Resuming analysis…', {
+			description: 'Picking up where you left off.',
+			dismissible: false
+		});
+		await runStream(pending.accessDigest, pending.modelId, pending.strike, pending.isUp, toastId);
+	}
+
+	// Re-surface an owned analysis (proof + decrypt) from the DB for this market.
+	async function recoverOwned(oracleId: string) {
+		if (!sessionToken) return;
+		try {
+			const r = await getMyAnalyses(sessionToken);
+			const owned = r.analyses.find((a) => a.market_id === oracleId);
+			if (!owned) return;
+			if (owned.blob_id) sealRef = { blobId: owned.blob_id, receiptId: owned.receipt_id };
+			if (owned.public_blob_id) proofBlobId = owned.public_blob_id;
+			clearPendingAnalysis(oracleId);
+		} catch {
+			/* best effort */
 		}
 	}
 
@@ -413,7 +564,11 @@
 								</DropdownMenu.RadioGroup>
 							</DropdownMenu.Content>
 						</DropdownMenu.Root>
-						<Button size="sm" onclick={analyze} disabled={analyzing || !selectedModel}>
+						<Button
+							size="sm"
+							onclick={analyze}
+							disabled={analyzing || proofPending || !selectedModel}
+						>
 							{#if analyzing}
 								Analyzing…
 							{:else}
@@ -422,7 +577,7 @@
 						</Button>
 					</div>
 
-					{#if rec || sealRef || proofBlobId}
+					{#if analyzing || streamReasoning || rec || sealRef || proofBlobId}
 						<div class="mt-2 bg-primary-subtle/40 p-2 text-xs">
 							{#if rec}
 								<p class="font-semibold text-primary-deep">
@@ -447,6 +602,27 @@
 								<p class="mt-1 text-[11px] text-ink-subdued">
 									Crypto direction is hard to beat — treat the edge as a hint, not a guarantee.
 								</p>
+								{#if proofPending && !proofBlobId && !sealRef}
+									<p class="mt-1 text-[11px] text-ink-subdued">
+										🔒 Generating verifiable proof on Walrus…
+									</p>
+								{/if}
+							{:else if analyzing || streamReasoning}
+								<!-- Live streaming reasoning (ChatGPT-style typewriter). -->
+								<p class="font-semibold text-primary-deep">
+									{#if stage === 'proof'}
+										🔒 <span class="ai-dots">Generating proof</span>
+									{:else}
+										🤖 <span class="ai-dots">Reasoning</span>
+									{/if}
+								</p>
+								{#if streamReasoning}
+									<p class="mt-1 whitespace-pre-line text-ink-muted">
+										{streamReasoning}<span
+											class="ml-0.5 inline-block h-3 w-[2px] animate-pulse bg-ink-muted align-middle"
+										></span>
+									</p>
+								{/if}
 							{:else}
 								<p class="text-ink-muted">
 									🔒 You own an analysis for this market — decrypt to view.

@@ -2,16 +2,22 @@
 	import './layout.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { initAuthStore, setupEnoki } from '$lib/features/wallet';
+	import { initAuthStore, setupEnoki, clearAuth } from '$lib/features/wallet';
+	import { setUnauthorizedHandler } from '$lib/api';
 	import Navbar from '$lib/components/generic/Navbar.svelte';
 	import SEO from '$lib/components/generic/SEO.svelte';
 	import type { PageMeta } from '$lib/metadata';
-	import { Toaster } from 'svelte-sonner';
+	import { toast, Toaster } from 'svelte-sonner';
 
 	let { children } = $props();
 
 	// Shared wallet/session state for the navbar + every page.
-	initAuthStore();
+	const auth = initAuthStore();
+	// On a 401 from any authed call, the session expired — clear it + prompt re-auth.
+	setUnauthorizedHandler(() => {
+		clearAuth(auth);
+		toast.error('Session expired', { description: 'Please sign in again.' });
+	});
 	// Register the Enoki "Sign in with Google" wallet (browser-only; no-op if unconfigured).
 	onMount(() => setupEnoki());
 

@@ -58,8 +58,7 @@
 		}
 		return LADDER.filter((s) => counts[s.label]).map((s) => ({
 			key: s.label,
-			label: s.label,
-			count: counts[s.label]
+			label: s.label
 		}));
 	});
 	let frame = $state<string | null>(null);
@@ -205,13 +204,11 @@
 					<button
 						type="button"
 						onclick={() => (frame = f.key)}
-						class="flex items-center justify-between gap-2 font-medium transition-colors {currentFrame ===
-						f.key
+						class="text-left font-medium transition-colors {currentFrame === f.key
 							? 'text-primary'
 							: 'text-ink-muted hover:text-ink'}"
 					>
 						{f.label}
-						<span class="text-xs text-ink-subdued">{f.count}</span>
 					</button>
 				{/each}
 			</div>
