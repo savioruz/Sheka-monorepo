@@ -1,14 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import type { Config } from '@config/config';
+import type { Database } from '@db/index';
 import type { Logger } from '@infras/logger/logger';
 import { SuiClient } from '@mysten/sui/client';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
+import { createMarketRepository } from './repository';
 
 export interface MarketServiceDeps {
   config: Config;
   logger: Logger;
+  db: Database;
 }
 
 export interface MarketState {
@@ -37,7 +40,8 @@ function loadAdminKeypair(adminAddress: string): Ed25519Keypair {
 }
 
 export function createMarketService(deps: MarketServiceDeps) {
-  const { config, logger } = deps;
+  const { config, logger, db } = deps;
+  const repo = createMarketRepository({ db });
   const client = new SuiClient({ url: config.sui.rpcUrl });
   const pkg = config.market.packageId;
   const adminCap = config.market.adminCapId;
@@ -121,7 +125,35 @@ export function createMarketService(deps: MarketServiceDeps) {
     }
   }
 
-  return { createMarket, resolveMarket, getMarketState };
+  // --- Local markets-cache reads/writes (delegated to the repository) ---
+
+  /** One market DB row by its on-chain object id, or undefined. */
+  function getMarketRow(marketObjectId: string) {
+    return repo.getByObjectId(marketObjectId);
+  }
+
+  /** All market DB rows. */
+  function listMarketRows() {
+    return repo.listAll();
+  }
+
+  /** Mark a market resolved (winner + settle tx digest). */
+  function markResolved(
+    marketObjectId: string,
+    winner: number,
+    resolveTxDigest: string,
+  ): Promise<void> {
+    return repo.markResolved(marketObjectId, winner, resolveTxDigest);
+  }
+
+  return {
+    createMarket,
+    resolveMarket,
+    getMarketState,
+    getMarketRow,
+    listMarketRows,
+    markResolved,
+  };
 }
 
 export type MarketService = ReturnType<typeof createMarketService>;

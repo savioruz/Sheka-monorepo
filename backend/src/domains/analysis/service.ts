@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { Config } from '@config/config';
 import type { Database } from '@db/index';
-import { models } from '@db/schema/models';
 import type { Logger } from '@infras/logger/logger';
 import { traced } from '@infras/otel/otel';
 import { SealClient } from '@mysten/seal';
 import { SuiClient } from '@mysten/sui/client';
+import { createAnalysisRepository } from './repository';
 
 // Stable JSON (recursively sorted keys) so a hash is reproducible by any verifier.
 function canonicalize(value: unknown): string {
@@ -63,6 +63,7 @@ const SEED_MODELS = [
 
 export function createAnalysisService(deps: AnalysisServiceDeps) {
   const { config, logger, db } = deps;
+  const repo = createAnalysisRepository({ db });
   const client = new SuiClient({ url: config.sui.rpcUrl });
   const sealClient = new SealClient({
     suiClient: client,
@@ -74,7 +75,7 @@ export function createAnalysisService(deps: AnalysisServiceDeps) {
 
   // Idempotently seed the model catalog (ids match the on-chain price registry).
   async function seedModels(): Promise<void> {
-    await db.insert(models).values(SEED_MODELS).onConflictDoNothing();
+    await repo.insertSeedModels(SEED_MODELS);
   }
 
   /**
@@ -222,7 +223,71 @@ export function createAnalysisService(deps: AnalysisServiceDeps) {
     }
   }
 
-  return { seedModels, verifyAccess, freeUsed, storeProof };
+  // --- DB-backed reads/writes (delegated to the repository) ---
+
+  /** Active model catalog (for the analyze picker), ordered by sort. */
+  function listActiveModels() {
+    return repo.listActiveModels();
+  }
+
+  /** One model row by id, or undefined. */
+  function getModel(modelId: number) {
+    return repo.getModelById(modelId);
+  }
+
+  /** True if this receipt already yielded a completed analysis (anti-replay). */
+  async function isReceiptConsumed(receiptId: string): Promise<boolean> {
+    const prior = await repo.getPaymentByReceipt(receiptId);
+    return prior?.status === 'done';
+  }
+
+  /** Analyses a wallet owns (re-view/decrypt across sessions); Seal/Walrus refs. */
+  async function ownedAnalyses(walletAddress: string) {
+    const rows = await repo.listOwnedPayments(walletAddress);
+    return rows
+      .filter((r) => r.marketId && r.blobId)
+      .map((r) => ({
+        market_id: r.marketId,
+        receipt_id: r.receiptId,
+        blob_id: r.blobId,
+        public_blob_id: r.publicBlobId,
+        content_sha256: r.contentSha256,
+        model_id: r.modelId,
+        created_at: r.createdAt,
+      }));
+  }
+
+  /** Consume-on-success: upsert the analysis payment row to 'done' with blob refs. */
+  function recordAnalysis(args: Parameters<typeof repo.upsertPaymentDone>[0]): Promise<void> {
+    return repo.upsertPaymentDone(args);
+  }
+
+  // Public verifiable AI-decision ledger: every analysis's hash-verifiable Walrus
+  // proof (newest-first). Public fields only — never the Seal blob id or wallet.
+  async function proofFeed(limit: number) {
+    const rows = await repo.listProofFeed(limit);
+    return rows.map((r) => ({
+      market_id: r.marketId,
+      model_id: r.modelId,
+      model_label: r.modelLabel,
+      public_blob_id: r.publicBlobId,
+      content_sha256: r.contentSha256,
+      created_at: r.createdAt,
+    }));
+  }
+
+  return {
+    seedModels,
+    verifyAccess,
+    freeUsed,
+    storeProof,
+    proofFeed,
+    listActiveModels,
+    getModel,
+    isReceiptConsumed,
+    ownedAnalyses,
+    recordAnalysis,
+  };
 }
 
 export type AnalysisService = ReturnType<typeof createAnalysisService>;

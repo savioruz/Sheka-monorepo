@@ -1,29 +1,22 @@
 import type { Config } from '@config/config';
-import type { Database } from '@db/index';
-import { analysisPayments } from '@db/schema/analysis-payments';
-import { models } from '@db/schema/models';
 import type { AnalysisJobs } from '@domains/analysis/jobs';
 import type { AnalysisService } from '@domains/analysis/service';
 import { traced } from '@infras/otel/otel';
-import { and, asc, desc, eq } from 'drizzle-orm';
 import type { Hono } from 'hono';
 import { error, success } from '../response';
 
 export interface AnalysisDeps {
   config: Config;
-  db: Database;
   analysisService: AnalysisService;
   analysisJobs: AnalysisJobs;
 }
 
 export function registerAnalysisRoutes(app: Hono, deps: AnalysisDeps) {
-  const { config, db, analysisService, analysisJobs } = deps;
+  const { config, analysisService, analysisJobs } = deps;
 
   // Public: the model catalog for the analyze dropdown.
   app.get('/api/models', async (c) => {
-    const rows = await traced('models.list', () =>
-      db.select().from(models).where(eq(models.active, true)).orderBy(asc(models.sort)),
-    );
+    const rows = await analysisService.listActiveModels();
     return c.json(
       success({
         models: rows.map((m) => ({
@@ -38,6 +31,16 @@ export function registerAnalysisRoutes(app: Hono, deps: AnalysisDeps) {
         })),
       }),
     );
+  });
+
+  // Public: the verifiable AI-decision ledger — every analysis's hash-verifiable
+  // Walrus public proof, newest-first. Public fields ONLY: never the Seal blob id
+  // or the full wallet. This is Sheka's auditable, accumulating "AI memory" surface.
+  app.get('/api/analysis/feed', async (c) => {
+    const limRaw = Number(c.req.query('limit'));
+    const limit = Number.isFinite(limRaw) && limRaw > 0 ? Math.min(limRaw, 100) : 50;
+    const analyses = await analysisService.proofFeed(limit);
+    return c.json(success({ analyses }));
   });
 
   // Auth: the caller's on-chain free quota (display).
@@ -56,32 +59,8 @@ export function registerAnalysisRoutes(app: Hono, deps: AnalysisDeps) {
   app.get('/api/analysis/mine', async (c) => {
     const walletAddress = c.get('walletAddress') as string | undefined;
     if (!walletAddress) return c.json(error('unauthorized', 'Wallet not authenticated'), 401);
-    const rows = await traced('analyses.mine', () =>
-      db
-        .select()
-        .from(analysisPayments)
-        .where(
-          and(
-            eq(analysisPayments.walletAddress, walletAddress),
-            eq(analysisPayments.status, 'done'),
-          ),
-        )
-        .orderBy(desc(analysisPayments.createdAt)),
-    );
-    return c.json(
-      success({
-        analyses: rows
-          .filter((r) => r.marketId && r.blobId)
-          .map((r) => ({
-            market_id: r.marketId,
-            receipt_id: r.receiptId,
-            blob_id: r.blobId,
-            public_blob_id: r.publicBlobId,
-            content_sha256: r.contentSha256,
-            model_id: r.modelId,
-          })),
-      }),
-    );
+    const analyses = await analysisService.ownedAnalyses(walletAddress);
+    return c.json(success({ analyses }));
   });
 
   // Auth: poll a background analysis job by its receipt id (job+poll flow). Returns

@@ -1,6 +1,3 @@
-import type { Database } from '@db/index';
-import { analysisPayments } from '@db/schema/analysis-payments';
-import { models } from '@db/schema/models';
 import type { AnalysisJobs } from '@domains/analysis/jobs';
 import type { AnalysisService } from '@domains/analysis/service';
 import type { CryptoAnalyst } from '@domains/crypto/crypto-analyst';
@@ -8,7 +5,6 @@ import type { CryptoNews } from '@domains/crypto/crypto-news';
 import type { PredictClient } from '@domains/crypto/predict-client';
 import { zValidator } from '@hono/zod-validator';
 import { traced } from '@infras/otel/otel';
-import { eq } from 'drizzle-orm';
 import type { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
@@ -20,7 +16,6 @@ export interface CryptoDeps {
   cryptoAnalyst: CryptoAnalyst;
   analysisService: AnalysisService;
   analysisJobs: AnalysisJobs;
-  db: Database;
 }
 
 export function registerCryptoRoutes(app: Hono, deps: CryptoDeps) {
@@ -190,22 +185,15 @@ export function registerCryptoRoutes(app: Hono, deps: CryptoDeps) {
       }),
     );
     deps.analysisJobs.setProof(args.receiptId, { blobId, publicBlobId, contentSha256 });
-    await deps.db
-      .insert(analysisPayments)
-      .values({
-        receiptId: args.receiptId,
-        walletAddress: args.walletAddress,
-        modelId: args.modelId,
-        marketId: args.oracleId,
-        blobId,
-        publicBlobId,
-        contentSha256,
-        status: 'done',
-      })
-      .onConflictDoUpdate({
-        target: analysisPayments.receiptId,
-        set: { status: 'done', blobId, publicBlobId, contentSha256, updatedAt: new Date() },
-      });
+    await deps.analysisService.recordAnalysis({
+      receiptId: args.receiptId,
+      walletAddress: args.walletAddress,
+      modelId: args.modelId,
+      marketId: args.oracleId,
+      blobId,
+      publicBlobId,
+      contentSha256,
+    });
     return { publicBlobId, blobId, contentSha256 };
   }
 
@@ -275,8 +263,8 @@ export function registerCryptoRoutes(app: Hono, deps: CryptoDeps) {
       const oracleId = c.req.param('oracleId');
       const { model_id, access_tx_digest, strike, is_up } = c.req.valid('json');
 
-      const [model] = await traced('crypto.analyze.model', () =>
-        deps.db.select().from(models).where(eq(models.id, model_id)).limit(1),
+      const model = await traced('crypto.analyze.model', () =>
+        deps.analysisService.getModel(model_id),
       );
       if (!model || !model.active) return c.json(error('bad_model', 'Unknown model'), 400);
 
@@ -290,12 +278,7 @@ export function registerCryptoRoutes(app: Hono, deps: CryptoDeps) {
       const receiptId = access.receiptId;
 
       // Anti-replay: a persisted 'done' row, or an already-running job for this receipt.
-      const prior = await deps.db
-        .select()
-        .from(analysisPayments)
-        .where(eq(analysisPayments.receiptId, receiptId))
-        .limit(1);
-      if (prior.length > 0 && prior[0].status === 'done') {
+      if (await deps.analysisService.isReceiptConsumed(receiptId)) {
         return c.json(error('already_used', 'This access was already consumed'), 409);
       }
       if (!deps.analysisJobs.claim(receiptId, walletAddress)) {
@@ -332,8 +315,8 @@ export function registerCryptoRoutes(app: Hono, deps: CryptoDeps) {
       const oracleId = c.req.param('oracleId');
       const { model_id, access_tx_digest, strike, is_up } = c.req.valid('json');
 
-      const [model] = await traced('crypto.analyze.model', () =>
-        deps.db.select().from(models).where(eq(models.id, model_id)).limit(1),
+      const model = await traced('crypto.analyze.model', () =>
+        deps.analysisService.getModel(model_id),
       );
       if (!model || !model.active) return c.json(error('bad_model', 'Unknown model'), 400);
 
@@ -345,12 +328,7 @@ export function registerCryptoRoutes(app: Hono, deps: CryptoDeps) {
       }
       const receiptId = access.receiptId;
 
-      const prior = await deps.db
-        .select()
-        .from(analysisPayments)
-        .where(eq(analysisPayments.receiptId, receiptId))
-        .limit(1);
-      if (prior.length > 0 && prior[0].status === 'done') {
+      if (await deps.analysisService.isReceiptConsumed(receiptId)) {
         return c.json(error('already_used', 'This access was already consumed'), 409);
       }
       if (!deps.analysisJobs.claim(receiptId, walletAddress)) {

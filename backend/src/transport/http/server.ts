@@ -87,7 +87,6 @@ export function createServer(deps: ServerDeps): Hono {
     cryptoAnalyst,
     analysisService,
     analysisJobs,
-    db,
   });
   registerNonceRoutes(app, { nonceManager });
   registerVerifyRoutes(app, { verifier });
@@ -98,9 +97,8 @@ export function createServer(deps: ServerDeps): Hono {
   app.use('/api/analysis/mine', authMiddleware);
   app.use('/api/analysis/job/:receiptId', authMiddleware);
 
-  registerAnalysisRoutes(app, { config, db, analysisService, analysisJobs });
+  registerAnalysisRoutes(app, { config, analysisService, analysisJobs });
   registerMarketsRoutes(app, {
-    db,
     marketService,
     ingestor,
     analyst,
