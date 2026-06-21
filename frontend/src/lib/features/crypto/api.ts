@@ -18,6 +18,10 @@ export interface CryptoPosition {
 	expiry: number; // ms epoch
 	quantity: number; // DUSDC payout if it wins
 	cost: number; // DUSDC paid
+	created_at: number; // ms epoch the position was placed
+	settled: boolean; // oracle has a settlement price
+	won: boolean | null; // null until settled; then did this side win
+	settlement_price: number | null; // USD, once settled
 }
 
 /** Live DeepBook Predict crypto-price markets (soonest expiry first). */

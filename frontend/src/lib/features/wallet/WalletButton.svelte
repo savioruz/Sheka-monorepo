@@ -20,6 +20,7 @@
 	// and pages observe the same connection.
 	const auth = getAuthStore();
 	const address = $derived($auth.address);
+	const sessionToken = $derived($auth.sessionToken);
 
 	let isConnecting = $state(false);
 	let pickerOpen = $state(false);
@@ -134,7 +135,12 @@
 	{/if}
 </div>
 
-<AccountDialog bind:open={accountOpen} address={address ?? ''} onDisconnect={disconnect} />
+<AccountDialog
+	bind:open={accountOpen}
+	address={address ?? ''}
+	{sessionToken}
+	onDisconnect={disconnect}
+/>
 
 <Dialog.Root bind:open={pickerOpen}>
 	<Dialog.Content>
