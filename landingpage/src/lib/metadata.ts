@@ -38,11 +38,9 @@ export const siteConfig = {
 	ogImage: '/og.png',
 	locale: 'en_US',
 	themeColor: '#ffffff',
-	twitter: '', // e.g. '@sheka'
-	// Search-console verification — fill when available.
-	googleVerification: '',
+	twitter: '',
+	googleVerification: 'google-site-verification=eMC_s1Vvh1ZHMYw4uTPhX45Yk8guxvRQskEyakk5LHc',
 	yandexVerification: '',
-	// Social profiles for the Organization JSON-LD — fill when available.
 	sameAs: [] as string[]
 };
 
