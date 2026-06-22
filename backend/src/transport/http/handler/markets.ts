@@ -1,7 +1,3 @@
-import type { Database } from '@db/index';
-import { analysisPayments } from '@db/schema/analysis-payments';
-import { markets } from '@db/schema/markets';
-import { models } from '@db/schema/models';
 import type { AnalysisJobs } from '@domains/analysis/jobs';
 import type { AnalysisService } from '@domains/analysis/service';
 import type { MarketService } from '@domains/market/service';
@@ -12,7 +8,6 @@ import type { GameSnapshot } from '@domains/prediction/types';
 import type { Sport } from '@domains/prediction/types';
 import { zValidator } from '@hono/zod-validator';
 import { traced } from '@infras/otel/otel';
-import { eq } from 'drizzle-orm';
 import type { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
@@ -21,7 +16,6 @@ import { error, success } from '../response';
 const OUTCOME_LABEL = ['Home', 'Draw', 'Away'];
 
 export interface MarketsDeps {
-  db: Database;
   marketService: MarketService;
   ingestor: Ingestor;
   analyst: Analyst;
@@ -30,7 +24,7 @@ export interface MarketsDeps {
 }
 
 export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
-  const { db, marketService, ingestor, analyst, analysisService, analysisJobs } = deps;
+  const { marketService, ingestor, analyst, analysisService, analysisJobs } = deps;
 
   const analyzeSchema = z.object({
     model_id: z.number().int().min(0),
@@ -46,14 +40,10 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
     const marketObjectId = c.req.param('id');
     const { model_id, access_tx_digest } = c.req.valid('json');
 
-    const [row] = await db
-      .select()
-      .from(markets)
-      .where(eq(markets.marketObjectId, marketObjectId))
-      .limit(1);
+    const row = await marketService.getMarketRow(marketObjectId);
     if (!row) return c.json(error('not_found', 'Market not found'), 404);
 
-    const [model] = await db.select().from(models).where(eq(models.id, model_id)).limit(1);
+    const model = await analysisService.getModel(model_id);
     if (!model || !model.active) return c.json(error('bad_model', 'Unknown model'), 400);
 
     // 1) Verify the on-chain access (purchase or claim_free) for this wallet+model.
@@ -65,12 +55,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
     }
     const receiptId = access.receiptId; // pin: narrowing is lost inside traced() closures
     // 2) Anti-replay: a receipt yields exactly one analysis.
-    const prior = await db
-      .select()
-      .from(analysisPayments)
-      .where(eq(analysisPayments.receiptId, receiptId))
-      .limit(1);
-    if (prior.length > 0 && prior[0].status === 'done') {
+    if (await analysisService.isReceiptConsumed(receiptId)) {
       return c.json(error('already_used', 'This access was already consumed'), 409);
     }
 
@@ -163,22 +148,15 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
     );
 
     // 5) Consume-on-success.
-    await db
-      .insert(analysisPayments)
-      .values({
-        receiptId,
-        walletAddress,
-        modelId: model_id,
-        marketId: marketObjectId,
-        blobId,
-        publicBlobId,
-        contentSha256,
-        status: 'done',
-      })
-      .onConflictDoUpdate({
-        target: analysisPayments.receiptId,
-        set: { status: 'done', blobId, publicBlobId, contentSha256, updatedAt: new Date() },
-      });
+    await analysisService.recordAnalysis({
+      receiptId,
+      walletAddress,
+      modelId: model_id,
+      marketId: marketObjectId,
+      blobId,
+      publicBlobId,
+      contentSha256,
+    });
 
     return c.json(
       success({
@@ -278,14 +256,10 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
     const marketObjectId = c.req.param('id');
     const { model_id, access_tx_digest } = c.req.valid('json');
 
-    const [row] = await db
-      .select()
-      .from(markets)
-      .where(eq(markets.marketObjectId, marketObjectId))
-      .limit(1);
+    const row = await marketService.getMarketRow(marketObjectId);
     if (!row) return c.json(error('not_found', 'Market not found'), 404);
 
-    const [model] = await db.select().from(models).where(eq(models.id, model_id)).limit(1);
+    const model = await analysisService.getModel(model_id);
     if (!model || !model.active) return c.json(error('bad_model', 'Unknown model'), 400);
 
     const access = await traced('markets.analyze.verifyAccess', () =>
@@ -296,12 +270,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
     }
     const receiptId = access.receiptId;
 
-    const prior = await db
-      .select()
-      .from(analysisPayments)
-      .where(eq(analysisPayments.receiptId, receiptId))
-      .limit(1);
-    if (prior.length > 0 && prior[0].status === 'done') {
+    if (await analysisService.isReceiptConsumed(receiptId)) {
       return c.json(error('already_used', 'This access was already consumed'), 409);
     }
     if (!analysisJobs.claim(receiptId, walletAddress)) {
@@ -366,22 +335,15 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
               }),
           );
           analysisJobs.setProof(receiptId, { blobId, publicBlobId, contentSha256 });
-          await db
-            .insert(analysisPayments)
-            .values({
-              receiptId,
-              walletAddress,
-              modelId: model_id,
-              marketId: marketObjectId,
-              blobId,
-              publicBlobId,
-              contentSha256,
-              status: 'done',
-            })
-            .onConflictDoUpdate({
-              target: analysisPayments.receiptId,
-              set: { status: 'done', blobId, publicBlobId, contentSha256, updatedAt: new Date() },
-            });
+          await analysisService.recordAnalysis({
+            receiptId,
+            walletAddress,
+            modelId: model_id,
+            marketId: marketObjectId,
+            blobId,
+            publicBlobId,
+            contentSha256,
+          });
           await send('proof', {
             public_blob_id: publicBlobId,
             blob_id: blobId,
@@ -403,11 +365,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
   // scheduler (admin-keypair signed, off the public API).
   app.post('/api/markets/:id/resolve-auto', async (c) => {
     const marketObjectId = c.req.param('id');
-    const [row] = await db
-      .select()
-      .from(markets)
-      .where(eq(markets.marketObjectId, marketObjectId))
-      .limit(1);
+    const row = await marketService.getMarketRow(marketObjectId);
     if (!row) return c.json(error('not_found', 'Market not found'), 404);
 
     const game = await traced('markets.resolveAuto.fetchGameContext', () =>
@@ -425,10 +383,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
       const digest = await traced('markets.resolveAuto.resolve', () =>
         marketService.resolveMarket(marketObjectId, winner),
       );
-      await db
-        .update(markets)
-        .set({ status: 'resolved', winner, resolveTxDigest: digest, updatedAt: new Date() })
-        .where(eq(markets.marketObjectId, marketObjectId));
+      await marketService.markResolved(marketObjectId, winner, digest);
       return c.json(
         success({
           market_object_id: marketObjectId,
@@ -443,7 +398,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
   });
 
   // Shape a DB market row with its live on-chain pools + implied odds (%).
-  type MarketRow = typeof markets.$inferSelect;
+  type MarketRow = NonNullable<Awaited<ReturnType<typeof marketService.getMarketRow>>>;
   async function enrichMarket(m: MarketRow) {
     const state = await traced('markets.enrich.marketState', () =>
       marketService.getMarketState(m.marketObjectId),
@@ -475,7 +430,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
 
   // Public: list markets with live on-chain pools + implied odds (%).
   app.get('/api/markets', async (c) => {
-    const rows = await traced('markets.list', () => db.select().from(markets));
+    const rows = await traced('markets.list', () => marketService.listMarketRows());
     const enriched = await Promise.all(rows.map(enrichMarket));
     return c.json(success({ markets: enriched }));
   });
@@ -483,11 +438,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
   // Public: a single market (for the /market/[id] detail page).
   app.get('/api/markets/:id', async (c) => {
     const marketObjectId = c.req.param('id');
-    const [row] = await db
-      .select()
-      .from(markets)
-      .where(eq(markets.marketObjectId, marketObjectId))
-      .limit(1);
+    const row = await marketService.getMarketRow(marketObjectId);
     if (!row) return c.json(error('not_found', 'Market not found'), 404);
     return c.json(success({ market: await enrichMarket(row) }));
   });
@@ -497,11 +448,7 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
   // an empty list if the upstream ESPN service is unavailable.
   app.get('/api/markets/:id/news', async (c) => {
     const marketObjectId = c.req.param('id');
-    const [row] = await db
-      .select()
-      .from(markets)
-      .where(eq(markets.marketObjectId, marketObjectId))
-      .limit(1);
+    const row = await marketService.getMarketRow(marketObjectId);
     if (!row) return c.json(error('not_found', 'Market not found'), 404);
 
     let articles: {

@@ -41,6 +41,10 @@ export interface CryptoPosition {
   expiry: number; // ms epoch
   quantity: number; // DUSDC payout if it wins
   cost: number; // DUSDC paid
+  created_at: number; // ms epoch the position was placed (first mint)
+  settled: boolean; // oracle has a settlement price
+  won: boolean | null; // null until settled; then did this side win
+  settlement_price: number | null; // USD, once settled
 }
 
 interface RawMinted {
@@ -50,6 +54,7 @@ interface RawMinted {
   expiry: string | number;
   quantity: string | number;
   cost: string | number;
+  checkpoint_timestamp_ms?: string | number; // when the mint was indexed (placed-at)
 }
 
 export interface PredictClientDeps {
@@ -133,34 +138,72 @@ export function createPredictClient(deps: PredictClientDeps) {
       redeemedQty.set(key(r), (redeemedQty.get(key(r)) ?? 0) + Number(r.quantity));
     }
 
-    // Aggregate minted by key (base units), keeping the first entry for its metadata.
-    const agg = new Map<string, { sample: RawMinted; qty: number; cost: number }>();
+    // Aggregate minted by key (base units), keeping the first entry for its
+    // metadata and the earliest mint timestamp as the "placed" date.
+    const agg = new Map<
+      string,
+      { sample: RawMinted; qty: number; cost: number; createdAt: number }
+    >();
     for (const m of data.minted) {
       const k = key(m);
+      const ts = Number(m.checkpoint_timestamp_ms ?? 0);
       const a = agg.get(k);
       if (a) {
         a.qty += Number(m.quantity);
         a.cost += Number(m.cost);
+        if (ts > 0 && (a.createdAt === 0 || ts < a.createdAt)) a.createdAt = ts;
       } else {
-        agg.set(k, { sample: m, qty: Number(m.quantity), cost: Number(m.cost) });
+        agg.set(k, { sample: m, qty: Number(m.quantity), cost: Number(m.cost), createdAt: ts });
       }
     }
 
-    const positions: CryptoPosition[] = [];
+    const open: CryptoPosition[] = [];
     for (const [k, a] of agg) {
       const netQty = a.qty - (redeemedQty.get(k) ?? 0);
       if (netQty < 1) continue; // fully redeemed/settled (ignore sub-base-unit dust)
       const costShare = a.qty > 0 ? (a.cost * netQty) / a.qty : a.cost; // proportional
-      positions.push({
+      open.push({
         oracle_id: a.sample.oracle_id,
         strike: Number(a.sample.strike) / PRICE_SCALE,
         is_up: a.sample.is_up,
         expiry: Number(a.sample.expiry),
         quantity: netQty / DUSDC_SCALE,
         cost: costShare / DUSDC_SCALE,
+        created_at: a.createdAt,
+        settled: false,
+        won: null,
+        settlement_price: null,
       });
     }
-    return positions.sort((a, b) => a.expiry - b.expiry);
+
+    // Enrich each open position with its oracle's settlement so the UI can show
+    // Won/Lost and surface claimable winnings. One state read per distinct oracle.
+    const oracleIds = [...new Set(open.map((p) => p.oracle_id))];
+    const settlements = new Map<string, { settled: boolean; price: number | null }>();
+    await Promise.all(oracleIds.map(async (id) => settlements.set(id, await oracleSettlement(id))));
+    for (const p of open) {
+      const s = settlements.get(p.oracle_id);
+      if (!s?.settled || s.price == null) continue;
+      p.settled = true;
+      p.settlement_price = s.price;
+      p.won = p.is_up ? s.price >= p.strike : s.price < p.strike;
+    }
+
+    return open.sort((a, b) => a.expiry - b.expiry);
+  }
+
+  // An oracle's settlement state (price in USD), once it has settled. While the
+  // oracle is still 'active' there is no settlement price yet.
+  async function oracleSettlement(
+    oracleId: string,
+  ): Promise<{ settled: boolean; price: number | null }> {
+    const state = await fetchJson<{
+      oracle?: { status?: string; settlement_price?: number | null };
+    }>(`/oracles/${oracleId}/state`);
+    const o = state?.oracle;
+    const sp = typeof o?.settlement_price === 'number' ? o.settlement_price / PRICE_SCALE : null;
+    const settled = !!o && o.status !== 'active' && sp != null;
+    return { settled, price: settled ? sp : null };
   }
 
   // Read-only price quote for an Up/Down position via `get_trade_amounts`

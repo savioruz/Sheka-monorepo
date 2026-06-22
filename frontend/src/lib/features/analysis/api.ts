@@ -9,6 +9,7 @@ export interface OwnedAnalysis {
 	public_blob_id: string | null;
 	content_sha256: string | null;
 	model_id: number;
+	created_at: string;
 }
 
 /** Analyses the authenticated wallet owns (to re-view/decrypt across sessions). */
@@ -16,6 +17,24 @@ export async function getMyAnalyses(token: string): Promise<{ analyses: OwnedAna
 	const response = await request<{ data: { analyses: OwnedAnalysis[] } }>('/api/analysis/mine', {
 		token
 	});
+	return unwrap(response);
+}
+
+/** One entry in the public, verifiable AI-decision ledger (no auth, public proof only). */
+export interface ProofFeedItem {
+	market_id: string | null;
+	model_id: number;
+	model_label: string | null;
+	public_blob_id: string;
+	content_sha256: string | null;
+	created_at: string;
+}
+
+/** Public ledger of every analysis's hash-verifiable Walrus proof (newest-first). */
+export async function getProofFeed(limit = 50): Promise<{ analyses: ProofFeedItem[] }> {
+	const response = await request<{ data: { analyses: ProofFeedItem[] } }>(
+		`/api/analysis/feed?limit=${limit}`
+	);
 	return unwrap(response);
 }
 

@@ -4,8 +4,8 @@
     "dev": "bun run --hot src/cmd/server/main.ts",
     "start": "bun run src/cmd/server/main.ts",
     "test": "bun test",
-    "lint": "biome check src scripts",
-    "lint:fix": "biome check src scripts --write",
+    "lint": "biome check src",
+    "lint:fix": "biome check src --write",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio"

@@ -19,7 +19,7 @@ async function main() {
     const db = createDb(config);
     const ingestor = createIngestor({ config, db, logger });
     const analyst = createAnalyst({ config });
-    const marketService = createMarketService({ config, logger });
+    const marketService = createMarketService({ config, logger, db });
     const analysisService = createAnalysisService({ config, logger, db });
     await analysisService.seedModels();
 
