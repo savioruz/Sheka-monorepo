@@ -47,6 +47,10 @@ export interface CryptoPosition {
   settlement_price: number | null; // USD, once settled
 }
 
+export interface CryptoPositionHistory extends CryptoPosition {
+  redeemed: boolean; // fully redeemed/withdrawn — kept for the Won/Lost record
+}
+
 interface RawMinted {
   oracle_id: string;
   strike: string | number;
@@ -176,20 +180,78 @@ export function createPredictClient(deps: PredictClientDeps) {
       });
     }
 
-    // Enrich each open position with its oracle's settlement so the UI can show
-    // Won/Lost and surface claimable winnings. One state read per distinct oracle.
-    const oracleIds = [...new Set(open.map((p) => p.oracle_id))];
+    await enrichSettlement(open);
+    return open.sort((a, b) => a.expiry - b.expiry);
+  }
+
+  // Attach each position's oracle settlement (settled/won/settlement_price) in place,
+  // so the UI can show Won/Lost. One state read per distinct oracle.
+  async function enrichSettlement(arr: CryptoPosition[]): Promise<void> {
+    const oracleIds = [...new Set(arr.map((p) => p.oracle_id))];
     const settlements = new Map<string, { settled: boolean; price: number | null }>();
     await Promise.all(oracleIds.map(async (id) => settlements.set(id, await oracleSettlement(id))));
-    for (const p of open) {
+    for (const p of arr) {
       const s = settlements.get(p.oracle_id);
       if (!s?.settled || s.price == null) continue;
       p.settled = true;
       p.settlement_price = s.price;
       p.won = p.is_up ? s.price >= p.strike : s.price < p.strike;
     }
+  }
 
-    return open.sort((a, b) => a.expiry - b.expiry);
+  // Full position HISTORY — every minted position aggregated by key, INCLUDING
+  // fully-redeemed ones (so the wallet can show a Won/Lost track record). Unlike
+  // listPositions (open only), this never drops redeemed positions; `redeemed`
+  // marks them, and `quantity`/`cost` are the FULL position size (not net).
+  async function listPositionHistory(managerId: string): Promise<CryptoPositionHistory[]> {
+    const data = await fetchJson<{ minted?: RawMinted[]; redeemed?: RawMinted[] }>(
+      `/managers/${managerId}/positions`,
+    );
+    if (!data?.minted) return [];
+    const key = (m: RawMinted) => `${m.oracle_id}:${m.strike}:${m.is_up}`;
+
+    const redeemedQty = new Map<string, number>();
+    for (const r of data.redeemed ?? []) {
+      redeemedQty.set(key(r), (redeemedQty.get(key(r)) ?? 0) + Number(r.quantity));
+    }
+
+    const agg = new Map<
+      string,
+      { sample: RawMinted; qty: number; cost: number; createdAt: number }
+    >();
+    for (const m of data.minted) {
+      const k = key(m);
+      const ts = Number(m.checkpoint_timestamp_ms ?? 0);
+      const a = agg.get(k);
+      if (a) {
+        a.qty += Number(m.quantity);
+        a.cost += Number(m.cost);
+        if (ts > 0 && (a.createdAt === 0 || ts < a.createdAt)) a.createdAt = ts;
+      } else {
+        agg.set(k, { sample: m, qty: Number(m.quantity), cost: Number(m.cost), createdAt: ts });
+      }
+    }
+
+    const items: CryptoPositionHistory[] = [];
+    for (const [k, a] of agg) {
+      const openQty = a.qty - (redeemedQty.get(k) ?? 0);
+      items.push({
+        oracle_id: a.sample.oracle_id,
+        strike: Number(a.sample.strike) / PRICE_SCALE,
+        is_up: a.sample.is_up,
+        expiry: Number(a.sample.expiry),
+        quantity: a.qty / DUSDC_SCALE,
+        cost: a.cost / DUSDC_SCALE,
+        created_at: a.createdAt,
+        settled: false,
+        won: null,
+        settlement_price: null,
+        redeemed: openQty < 1,
+      });
+    }
+
+    await enrichSettlement(items);
+    return items.sort((a, b) => b.created_at - a.created_at); // newest first
   }
 
   // An oracle's settlement state (price in USD), once it has settled. While the
@@ -254,6 +316,29 @@ export function createPredictClient(deps: PredictClientDeps) {
     }
   }
 
+  // A manager's free (withdrawable) DUSDC balance — redeemed winnings + deposit
+  // change that haven't been pulled back to the wallet yet. Server-side devInspect.
+  async function managerBalance(managerId: string): Promise<number> {
+    try {
+      const tx = new Transaction();
+      tx.moveCall({
+        target: `${pkg}::predict_manager::balance`,
+        typeArguments: [config.deepbookPredict.dusdcType],
+        arguments: [tx.object(managerId)],
+      });
+      const r = await sui.devInspectTransactionBlock({ sender: DEAD_SENDER, transactionBlock: tx });
+      const rv = r.results?.[0]?.returnValues;
+      if (!rv || rv.length < 1) return 0;
+      return Number(bcs.u64().parse(Uint8Array.from(rv[0][0]))) / DUSDC_SCALE;
+    } catch (err) {
+      logger.warn(
+        { error: err instanceof Error ? err.message : String(err) },
+        'managerBalance failed',
+      );
+      return 0;
+    }
+  }
+
   // Single oracle's current asset/spot/expiry (for AI analysis context).
   async function getOracle(
     oracleId: string,
@@ -289,7 +374,15 @@ export function createPredictClient(deps: PredictClientDeps) {
     }
   }
 
-  return { listMarkets, listPositions, quote, findManager, getOracle };
+  return {
+    listMarkets,
+    listPositions,
+    listPositionHistory,
+    quote,
+    findManager,
+    getOracle,
+    managerBalance,
+  };
 }
 
 export type PredictClient = ReturnType<typeof createPredictClient>;
