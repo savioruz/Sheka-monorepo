@@ -8,7 +8,11 @@
 		type UserPosition,
 		type Market
 	} from '$lib/features/markets';
-	import { findManager, getCryptoPositions, type CryptoPosition } from '$lib/features/crypto';
+	import {
+		findManager,
+		getCryptoPositionHistory,
+		type CryptoPositionHistory
+	} from '$lib/features/crypto';
 	import { Badge, type BadgeVariant } from '$lib/components/ui/badge';
 	import { suiClient, formatBalance } from '$lib/sui';
 
@@ -24,7 +28,7 @@
 	let positionsLoading = $state(false);
 	let analyses = $state<OwnedAnalysis[]>([]);
 	let sportsPos = $state<UserPosition[]>([]);
-	let cryptoPos = $state<CryptoPosition[]>([]);
+	let cryptoPos = $state<CryptoPositionHistory[]>([]);
 	let modelLabels = $state<Record<number, string>>({});
 	let marketMap = $state<Record<string, Market>>({});
 
@@ -61,7 +65,7 @@
 			sportsPos = sports;
 			if (manager) {
 				try {
-					cryptoPos = (await getCryptoPositions(manager)).positions;
+					cryptoPos = (await getCryptoPositionHistory(manager)).positions;
 				} catch {
 					/* keep */
 				}
@@ -98,7 +102,7 @@
 	// Won/Lost/Open badge: green when this position beat its market/oracle, red when
 	// it lost, neutral while still unsettled/unresolved.
 	type WLBadge = { text: string; variant: BadgeVariant };
-	function cryptoBadge(p: CryptoPosition): WLBadge {
+	function cryptoBadge(p: CryptoPositionHistory): WLBadge {
 		if (!p.settled) return { text: 'Open', variant: 'outline' };
 		return p.won ? { text: 'Won', variant: 'default' } : { text: 'Lost', variant: 'destructive' };
 	}
@@ -204,6 +208,9 @@
 										{shortId(p.oracle_id)}
 									</a>
 									<Badge variant={cb.variant} class="shrink-0">{cb.text}</Badge>
+									{#if p.redeemed}
+										<span class="shrink-0 text-[10px] text-ink-subdued">claimed</span>
+									{/if}
 								</div>
 								<span class="shrink-0 text-xs font-medium text-ink">{p.cost.toFixed(2)} DUSDC</span>
 							</div>

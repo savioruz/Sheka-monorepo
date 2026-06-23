@@ -51,7 +51,8 @@
 								strike: item.strike,
 								isUp: item.isUp
 							},
-							qty: BigInt(Math.round(item.quantity * DUSDC_SCALE))
+							qty: BigInt(Math.round(item.quantity * DUSDC_SCALE)),
+							owner: walletAddress
 						});
 			const { bytes, signature } = await signTransaction(tx);
 			const res = await suiClient.executeTransactionBlock({

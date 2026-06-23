@@ -45,6 +45,34 @@ export function registerCryptoRoutes(app: Hono, deps: CryptoDeps) {
     }
   });
 
+  // Public: full position history (incl. redeemed) for the Won/Lost track record.
+  app.get('/api/crypto/position-history', async (c) => {
+    const manager = c.req.query('manager');
+    if (!manager) return c.json(success({ positions: [] }));
+    try {
+      const positions = await traced('crypto.listPositionHistory', () =>
+        deps.predictClient.listPositionHistory(manager),
+      );
+      return c.json(success({ positions }));
+    } catch {
+      return c.json(success({ positions: [] }));
+    }
+  });
+
+  // Public: a manager's free (withdrawable) DUSDC balance (?manager=0x…).
+  app.get('/api/crypto/balance', async (c) => {
+    const manager = c.req.query('manager');
+    if (!manager) return c.json(success({ balance: 0 }));
+    try {
+      const balance = await traced('crypto.managerBalance', () =>
+        deps.predictClient.managerBalance(manager),
+      );
+      return c.json(success({ balance }));
+    } catch {
+      return c.json(success({ balance: 0 }));
+    }
+  });
+
   // Public: price quote for an Up/Down position (server-side devInspect).
   app.get('/api/crypto/quote', async (c) => {
     const oracle = c.req.query('oracle');

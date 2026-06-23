@@ -4,10 +4,16 @@
 	import {
 		getCryptoMarkets,
 		getCryptoPositions,
+		getManagerBalance,
 		type CryptoMarket,
 		type CryptoPosition
 	} from './api';
-	import { findManager, buildRedeemTransaction, DUSDC_SCALE } from './predict';
+	import {
+		findManager,
+		buildRedeemTransaction,
+		buildWithdrawTransaction,
+		DUSDC_SCALE
+	} from './predict';
 	import { suiClient } from '$lib/sui';
 	import { signTransaction } from '$lib/features/wallet';
 	import { Button } from '$lib/components/ui/button';
@@ -26,6 +32,17 @@
 	let manager = $state<string | null>(null);
 	let positions = $state<CryptoPosition[]>([]);
 	let redeeming = $state<string | null>(null);
+	let managerBal = $state(0); // free DUSDC sitting in the manager (withdrawable)
+	let withdrawing = $state(false);
+
+	const DUSDC_TYPE = import.meta.env.VITE_DUSDC_TYPE ?? '';
+	// Net DUSDC credited to the wallet by a tx (the redeem/withdraw payout).
+	function creditedDusdc(
+		changes: { coinType: string; amount: string }[] | null | undefined
+	): number {
+		const c = changes?.find((b) => b.coinType === DUSDC_TYPE);
+		return c ? Number(c.amount) / DUSDC_SCALE : 0;
+	}
 
 	let dialogOpen = $state(false);
 	let selected = $state<CryptoMarket | null>(null);
@@ -89,6 +106,11 @@
 		} catch {
 			/* keep */
 		}
+		try {
+			managerBal = (await getManagerBalance(manager)).balance;
+		} catch {
+			/* keep */
+		}
 	}
 
 	// Reload positions when the trade dialog closes (a buy may have happened).
@@ -102,22 +124,27 @@
 	});
 
 	async function redeem(p: CryptoPosition) {
-		if (!manager || redeeming) return;
+		if (!manager || !walletAddress || redeeming) return;
 		redeeming = p.oracle_id + p.is_up;
 		const toastId = toast.loading('Redeeming…');
 		try {
 			const tx = buildRedeemTransaction({
 				manager,
 				key: { oracleId: p.oracle_id, expiry: p.expiry, strike: p.strike, isUp: p.is_up },
-				qty: BigInt(Math.round(p.quantity * DUSDC_SCALE))
+				qty: BigInt(Math.round(p.quantity * DUSDC_SCALE)),
+				owner: walletAddress
 			});
 			const { bytes, signature } = await signTransaction(tx);
 			const res = await suiClient.executeTransactionBlock({
 				transactionBlock: bytes,
 				signature,
-				options: { showEffects: true }
+				options: { showEffects: true, showBalanceChanges: true }
 			});
-			toast.success('Redeemed', { id: toastId, description: `${res.digest.slice(0, 14)}…` });
+			const credited = creditedDusdc(res.balanceChanges);
+			toast.success('Redeemed', {
+				id: toastId,
+				description: credited > 0 ? `+${credited} DUSDC` : `${res.digest.slice(0, 14)}…`
+			});
 			await loadPositions();
 		} catch (err) {
 			toast.error('Redeem failed', {
@@ -126,6 +153,35 @@
 			});
 		} finally {
 			redeeming = null;
+		}
+	}
+
+	// Pull the manager's free DUSDC (redeemed winnings + change) into the wallet.
+	async function withdraw() {
+		if (!manager || !walletAddress || withdrawing) return;
+		withdrawing = true;
+		const toastId = toast.loading('Withdrawing…');
+		try {
+			const tx = buildWithdrawTransaction({ manager, owner: walletAddress });
+			const { bytes, signature } = await signTransaction(tx);
+			const res = await suiClient.executeTransactionBlock({
+				transactionBlock: bytes,
+				signature,
+				options: { showEffects: true, showBalanceChanges: true }
+			});
+			const credited = creditedDusdc(res.balanceChanges);
+			toast.success('Withdrawn', {
+				id: toastId,
+				description: credited > 0 ? `+${credited} DUSDC` : `${res.digest.slice(0, 14)}…`
+			});
+			await loadPositions();
+		} catch (err) {
+			toast.error('Withdraw failed', {
+				id: toastId,
+				description: err instanceof Error ? err.message : 'Withdraw failed'
+			});
+		} finally {
+			withdrawing = false;
 		}
 	}
 
@@ -215,6 +271,19 @@
 		</aside>
 
 		<div class="min-w-0 md:flex-1">
+			{#if managerBal > 0}
+				<div
+					class="mb-4 flex items-center justify-between gap-2 border border-border bg-card p-3 shadow-card"
+				>
+					<span class="text-xs text-ink-muted">
+						Withdrawable balance
+						<span class="font-medium text-ink">{managerBal.toFixed(2)} DUSDC</span>
+					</span>
+					<Button size="sm" class="h-7 shrink-0" onclick={withdraw} disabled={withdrawing}>
+						{withdrawing ? 'Withdrawing…' : 'Withdraw'}
+					</Button>
+				</div>
+			{/if}
 			{#if positions.length > 0}
 				<div class="mb-4 border border-border bg-card p-3 shadow-card">
 					<p class="mb-2 text-xs font-semibold tracking-wide text-ink-muted uppercase">

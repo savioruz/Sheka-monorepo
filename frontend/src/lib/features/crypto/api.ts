@@ -47,12 +47,34 @@ export async function getCryptoNews(limit = 24): Promise<{ articles: CryptoNewsI
 	return unwrap(response);
 }
 
+export interface CryptoPositionHistory extends CryptoPosition {
+	redeemed: boolean; // fully redeemed/withdrawn — kept for the Won/Lost record
+}
+
 /** Open positions for a DeepBook Predict manager. */
 export async function getCryptoPositions(
 	manager: string
 ): Promise<{ positions: CryptoPosition[] }> {
 	const response = await request<{ data: { positions: CryptoPosition[] } }>(
 		`/api/crypto/positions?manager=${encodeURIComponent(manager)}`
+	);
+	return unwrap(response);
+}
+
+/** Full position history (incl. redeemed) for the Won/Lost track record. */
+export async function getCryptoPositionHistory(
+	manager: string
+): Promise<{ positions: CryptoPositionHistory[] }> {
+	const response = await request<{ data: { positions: CryptoPositionHistory[] } }>(
+		`/api/crypto/position-history?manager=${encodeURIComponent(manager)}`
+	);
+	return unwrap(response);
+}
+
+/** A manager's free (withdrawable) DUSDC balance — redeemed winnings + deposit change. */
+export async function getManagerBalance(manager: string): Promise<{ balance: number }> {
+	const response = await request<{ data: { balance: number } }>(
+		`/api/crypto/balance?manager=${encodeURIComponent(manager)}`
 	);
 	return unwrap(response);
 }
