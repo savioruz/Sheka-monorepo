@@ -135,11 +135,32 @@ export function buildBuyTransaction(inputs: {
 	return tx;
 }
 
-/** Redeem a settled position back into the manager's balance. */
+/**
+ * Sweep the manager's entire FREE DUSDC balance (redeemed winnings + any deposit
+ * change) out to `owner`'s wallet. `predict::redeem` only credits the manager's
+ * internal balance — without this, funds never reach the wallet. Open positions are
+ * held separately, so withdrawing the free balance never touches them.
+ */
+function sweepManagerToWallet(tx: Transaction, manager: string, owner: string): void {
+	const [bal] = tx.moveCall({
+		target: `${PKG}::predict_manager::balance`,
+		typeArguments: [DUSDC_TYPE],
+		arguments: [tx.object(manager)]
+	});
+	const [coin] = tx.moveCall({
+		target: `${PKG}::predict_manager::withdraw`,
+		typeArguments: [DUSDC_TYPE],
+		arguments: [tx.object(manager), bal]
+	});
+	tx.transferObjects([coin], tx.pure.address(owner));
+}
+
+/** Redeem a settled position AND withdraw the proceeds to the owner's wallet. */
 export function buildRedeemTransaction(inputs: {
 	manager: string;
 	key: MarketKeyInput;
 	qty: bigint;
+	owner: string;
 }): Transaction {
 	const tx = new Transaction();
 	tx.setGasBudget(100_000_000);
@@ -156,5 +177,16 @@ export function buildRedeemTransaction(inputs: {
 			tx.object(CLOCK)
 		]
 	});
+	// redeem credits the manager's free balance — sweep it to the wallet.
+	sweepManagerToWallet(tx, inputs.manager, inputs.owner);
+	return tx;
+}
+
+/** Withdraw the manager's free DUSDC balance to the wallet (no redeem) — recovers
+ * winnings already redeemed into the manager, plus any deposit change. */
+export function buildWithdrawTransaction(inputs: { manager: string; owner: string }): Transaction {
+	const tx = new Transaction();
+	tx.setGasBudget(50_000_000);
+	sweepManagerToWallet(tx, inputs.manager, inputs.owner);
 	return tx;
 }
