@@ -3,7 +3,12 @@
 	import { signTransaction, getAuthStore } from '$lib/features/wallet';
 	import { buildClaimTransaction } from '$lib/features/markets';
 	import { buildRedeemTransaction, DUSDC_SCALE } from '$lib/features/crypto';
-	import { claimable, refreshClaimable, type ClaimableItem } from '$lib/features/claims';
+	import {
+		claimable,
+		refreshClaimable,
+		removeClaimable,
+		type ClaimableItem
+	} from '$lib/features/claims';
 	import { Button } from '$lib/components/ui/button';
 	import { toast } from 'svelte-sonner';
 
@@ -68,7 +73,9 @@
 				id: toastId,
 				description: credited > 0 ? `+${credited} DUSDC` : `${res.digest.slice(0, 12)}…`
 			});
-			await refreshClaimable(walletAddress, suiClient);
+			// Optimistically drop the claimed item — the tx succeeded, so a refetch here
+			// would only risk re-adding it from not-yet-reindexed on-chain state.
+			removeClaimable(item.key);
 		} catch (err) {
 			toast.error('Claim failed', {
 				id: toastId,

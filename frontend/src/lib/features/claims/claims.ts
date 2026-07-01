@@ -125,6 +125,15 @@ export async function refreshClaimable(
 	return items;
 }
 
+/**
+ * Optimistically drop a just-claimed item from the store. The claim tx already
+ * succeeded, so this is correct — and it updates instantly (page list + navbar
+ * badge) without a refetch that on-chain/indexer lag could answer with stale data.
+ */
+export function removeClaimable(key: string): void {
+	claimable.update((list) => list.filter((i) => i.key !== key));
+}
+
 /** Clear on disconnect. */
 export function clearClaimable(): void {
 	lastAddress = null;
