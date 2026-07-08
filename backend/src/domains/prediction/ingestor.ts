@@ -2,6 +2,7 @@ import type { Config } from '@config/config';
 import type { Database } from '@db/index';
 import { soccerAthletes } from '@db/schema/soccer-athletes';
 import type { Logger } from '@infras/logger/logger';
+import { context, propagation } from '@opentelemetry/api';
 import { eq } from 'drizzle-orm';
 
 import type { GameSnapshot, Sport, TeamSnapshot } from './types';
@@ -208,6 +209,9 @@ export function createIngestor(deps: IngestorDeps) {
     if (config.espn.apiKey) {
       headers['X-API-Key'] = config.espn.apiKey;
     }
+    // Propagate the active trace to go-espn-api (W3C `traceparent`). Bun's native
+    // fetch is not reliably auto-instrumented, so inject explicitly.
+    propagation.inject(context.active(), headers);
 
     // The upstream ESPN service is occasionally flaky (5xx / timeouts); retry a
     // couple of times with short backoff before giving up.
@@ -641,6 +645,7 @@ export function createIngestor(deps: IngestorDeps) {
       Accept: 'application/json',
     };
     if (config.espn.apiKey) headers['X-API-Key'] = config.espn.apiKey;
+    propagation.inject(context.active(), headers);
     try {
       await fetch(`${baseUrl}/api/v1/ingest/scoreboard/`, {
         method: 'POST',

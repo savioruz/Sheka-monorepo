@@ -2,6 +2,7 @@ import type { Config } from '@config/config';
 import type { Database } from '@db/index';
 import { soccerAthletes } from '@db/schema/soccer-athletes';
 import type { Logger } from '@infras/logger/logger';
+import { context, propagation } from '@opentelemetry/api';
 import { eq, sql } from 'drizzle-orm';
 
 export interface EspnSyncDeps {
@@ -37,6 +38,8 @@ export function createEspnSync(deps: EspnSyncDeps) {
     if (config.espn.apiKey) {
       headers['X-API-Key'] = config.espn.apiKey;
     }
+    // Propagate the active trace to go-espn-api (W3C `traceparent`).
+    propagation.inject(context.active(), headers);
 
     try {
       const response = await fetch(url, {
