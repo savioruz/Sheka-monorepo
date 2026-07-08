@@ -2,6 +2,12 @@ import type { Config } from '@config/config';
 import type { Logger } from '@infras/logger/logger';
 import type { Context } from '@opentelemetry/api';
 import { type Span, SpanStatusCode, context as otelContext, trace } from '@opentelemetry/api';
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+import {
+  CompositePropagator,
+  W3CBaggagePropagator,
+  W3CTraceContextPropagator,
+} from '@opentelemetry/core';
 import { OTLPTraceExporter as OTLPGrpcExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPTraceExporter as OTLPHttpExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
@@ -113,6 +119,15 @@ class OtelImpl implements Otel {
     this.sdk = new NodeSDK({
       resource,
       spanProcessor: new BatchSpanProcessor(traceExporter),
+      // Register a W3C tracecontext + baggage propagator so `propagation.inject`
+      // writes `traceparent` into outbound headers (the cross-service link).
+      textMapPropagator: new CompositePropagator({
+        propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],
+      }),
+      // Auto-instrumentations add spans for pg/http/etc. Bun does not reliably
+      // patch native fetch, so outbound `traceparent` still relies on the
+      // explicit `propagation.inject` calls in the ESPN fetch helpers.
+      instrumentations: [getNodeAutoInstrumentations()],
     });
 
     this.sdk.start();
