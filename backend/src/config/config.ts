@@ -23,7 +23,7 @@ const configSchema = z.object({
     model: z.string().default('anthropic/claude-sonnet-4-6'),
   }),
   sui: z.object({
-    rpcUrl: z.string().default('https://fullnode.testnet.sui.io:443'),
+    rpcUrl: z.string().default('https://sui-testnet-rpc.publicnode.com'),
     network: z.string().default('testnet'),
   }),
   dusdc: z.object({
@@ -64,7 +64,7 @@ const configSchema = z.object({
   walrus: z.object({
     gatewayUrl: z.string().default('https://aggregator.walrus-testnet.walrus.space/v1'),
     publisherUrl: z.string().default('https://publisher.walrus-testnet.walrus.space'),
-    epochs: z.number().default(5),
+    epochs: z.number().default(53),
   }),
   // DeepBook Predict (Mysten on-chain prediction markets) — crypto-price binaries.
   deepbookPredict: z.object({
@@ -139,7 +139,7 @@ export function loadConfig(): Config {
       model: env('OPENROUTER_MODEL', 'anthropic/claude-sonnet-4-6'),
     },
     sui: {
-      rpcUrl: env('SUI_RPC_URL', 'https://fullnode.testnet.sui.io:443'),
+      rpcUrl: env('SUI_RPC_URL', 'https://sui-testnet-rpc.publicnode.com'),
       network: env('SUI_NETWORK', 'testnet'),
     },
     dusdc: {
@@ -172,7 +172,7 @@ export function loadConfig(): Config {
     walrus: {
       gatewayUrl: env('WALRUS_GATEWAY_URL', 'https://aggregator.walrus-testnet.walrus.space/v1'),
       publisherUrl: env('WALRUS_PUBLISHER_URL', 'https://publisher.walrus-testnet.walrus.space'),
-      epochs: envNum('WALRUS_EPOCHS', 5),
+      epochs: envNum('WALRUS_EPOCHS', 53),
     },
     deepbookPredict: {
       packageId: env(
