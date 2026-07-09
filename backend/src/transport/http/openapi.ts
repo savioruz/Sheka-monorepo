@@ -116,6 +116,19 @@ const OPENAPI_SPEC = {
         },
       },
     },
+    '/api/markets/{id}/void': {
+      post: {
+        summary:
+          'Operator: void a stuck market — resolve to a void/empty outcome so claim refunds stakers',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Voided/refunded (returns winner, mode, tx_digest)' },
+          '404': { description: 'Market not found' },
+          '422': { description: 'Stakes on every outcome — cannot void backend-only' },
+          '502': { description: 'Could not read pools or resolve failed' },
+        },
+      },
+    },
     '/api/markets/{id}/analyze': {
       post: {
         summary:

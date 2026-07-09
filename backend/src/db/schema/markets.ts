@@ -15,6 +15,9 @@ export const markets = pgTable('markets', {
   // mirror of on-chain status for convenience; on-chain is source of truth
   status: text('status').default('open').notNull(),
   winner: integer('winner'),
+  // Why a market was resolved when it wasn't a normal final-score settlement.
+  // e.g. 'auto_void' for a stuck bracket-placeholder market cleared to refund stakers.
+  resolvedReason: text('resolved_reason'),
   // Live ESPN match status, refreshed by market-sync's per-open-market poll.
   // statusDetail e.g. "1st Half"/"Halftime"/"Full Time"; clock e.g. "45'".
   statusDetail: text('status_detail'),

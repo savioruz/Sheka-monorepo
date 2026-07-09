@@ -37,6 +37,9 @@ const configSchema = z.object({
     adminAddress: z.string().default(''),
     // Max markets auto-created per ESPN sync run (bounds on-chain gas).
     autoCreateLimit: z.number().default(8),
+    // Hours after kickoff before an open, never-final market is auto-voided
+    // (e.g. FIFA bracket placeholders ESPN never marks final under this espn_id).
+    stuckVoidHours: z.number().default(24),
   }),
   analysis: z.object({
     packageId: z.string().min(1, 'SHEKA_ANALYSIS_PACKAGE_ID is required'),
@@ -149,6 +152,7 @@ export function loadConfig(): Config {
       adminCapId: env('SHEKA_MARKET_ADMIN_CAP_ID', ''),
       adminAddress: env('SHEKA_MARKET_ADMIN_ADDRESS', ''),
       autoCreateLimit: envNum('SHEKA_MARKET_AUTO_CREATE_LIMIT', 8),
+      stuckVoidHours: envNum('STUCK_VOID_HOURS', 24),
     },
     analysis: {
       packageId: env('SHEKA_ANALYSIS_PACKAGE_ID', ''),

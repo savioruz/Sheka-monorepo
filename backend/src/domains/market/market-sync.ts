@@ -20,6 +20,55 @@ export function winnerFromScore(home: number, away: number): number {
   return home > away ? 0 : home === away ? 1 : 2;
 }
 
+export type VoidDecision =
+  | { kind: 'void'; winner: number } // no stake anywhere — harmless resolve
+  | { kind: 'refund'; winner: number } // resolve to an empty outcome → contract refunds all
+  | { kind: 'cannot' }; // stake on every outcome — can't void backend-only
+
+/**
+ * Decide how to terminally clear a stuck market from its on-chain per-outcome
+ * pools. The Sui `claim` refunds every staker whenever the winning outcome has
+ * an empty pool (`winning_pool == 0`), so:
+ *   - total == 0 (no stake)        → resolve to outcome 1 (harmless void)
+ *   - some stake, an empty outcome → resolve to the first empty outcome (refunds all)
+ *   - stake on all 3 outcomes      → cannot void backend-only (accepted limitation)
+ */
+export function decideVoidOutcome(pools: number[]): VoidDecision {
+  const total = pools.reduce((sum, p) => sum + p, 0);
+  if (total === 0) return { kind: 'void', winner: 1 };
+  const empty = pools.findIndex((p) => p === 0);
+  if (empty >= 0) return { kind: 'refund', winner: empty };
+  return { kind: 'cannot' };
+}
+
+export interface VoidResult {
+  status: 'voided' | 'refunded' | 'cannot' | 'no_state';
+  winner?: number;
+  digest?: string;
+}
+
+/**
+ * Read a market's on-chain pools and, when voidable, resolve it to a void/empty
+ * outcome so `claim` refunds stakers. Read-only getObject for the pools; the
+ * only tx is the admin-signed resolve. Shared by the resolver's stuck-market
+ * auto-void (#2) and the admin on-demand void endpoint (#3).
+ */
+export async function voidMarketByPools(
+  marketService: Pick<MarketService, 'getMarketState' | 'resolveMarket'>,
+  marketObjectId: string,
+): Promise<VoidResult> {
+  const state = await marketService.getMarketState(marketObjectId);
+  if (!state) return { status: 'no_state' };
+  const decision = decideVoidOutcome(state.pools);
+  if (decision.kind === 'cannot') return { status: 'cannot' };
+  const digest = await marketService.resolveMarket(marketObjectId, decision.winner);
+  return {
+    status: decision.kind === 'void' ? 'voided' : 'refunded',
+    winner: decision.winner,
+    digest,
+  };
+}
+
 /**
  * Autonomous market lifecycle driven by ESPN. Runs on the same schedule as the
  * ESPN sync: open a market for each new upcoming/live game, and resolve markets
@@ -36,6 +85,9 @@ export function createMarketSync(deps: MarketSyncDeps) {
   // A game that hasn't reported `final` this long after kickoff is treated as
   // stale (frozen upstream); we nudge a re-ingest, throttled per market.
   const STALE_GRACE_MS = 4 * 60 * 60 * 1000; // 4h
+  // A market still open & not-final this long after kickoff is terminally stuck
+  // (ESPN never marked the placeholder event final) → auto-void to free stakers.
+  const STUCK_VOID_MS = (config.market.stuckVoidHours ?? 24) * 60 * 60 * 1000;
   const REFRESH_THROTTLE_MS = 10 * 60 * 1000; // ≤ once / 10 min per market
   const lastRefresh = new Map<string, number>();
 
@@ -152,9 +204,60 @@ export function createMarketSync(deps: MarketSyncDeps) {
           .where(eq(markets.marketObjectId, row.marketObjectId));
 
         if (game.status !== 'final') {
-          // Stale guard: kickoff well past but the source still isn't final → the
-          // upstream is likely frozen. Nudge a re-ingest (throttled per market).
           const kickoff = row.scheduledAt?.getTime() ?? null;
+
+          // Terminally stuck (kickoff > STUCK_VOID_MS ago, still not final): the
+          // event will never go final (e.g. a bracket placeholder). Auto-void so
+          // stakers aren't locked forever. Throttled per market so a failing void
+          // retries next tick without spamming.
+          if (kickoff && Date.now() - kickoff > STUCK_VOID_MS) {
+            const last = lastRefresh.get(row.marketObjectId) ?? 0;
+            if (Date.now() - last > REFRESH_THROTTLE_MS) {
+              lastRefresh.set(row.marketObjectId, Date.now());
+              try {
+                const result = await voidMarketByPools(marketService, row.marketObjectId);
+                if (result.status === 'cannot') {
+                  logger.warn(
+                    { marketObjectId: row.marketObjectId },
+                    'market-sync: stuck market has stakes on every outcome — cannot auto-void',
+                  );
+                } else if (result.status === 'no_state') {
+                  logger.warn(
+                    { marketObjectId: row.marketObjectId },
+                    'market-sync: could not read on-chain pools for stuck market',
+                  );
+                } else if (result.digest) {
+                  await marketService.markVoided(
+                    row.marketObjectId,
+                    result.winner ?? 1,
+                    result.digest,
+                  );
+                  resolved += 1;
+                  logger.info(
+                    {
+                      marketObjectId: row.marketObjectId,
+                      winner: result.winner,
+                      mode: result.status,
+                    },
+                    'market-sync: auto-voided stuck market',
+                  );
+                }
+              } catch (err) {
+                logger.warn(
+                  {
+                    marketObjectId: row.marketObjectId,
+                    error: err instanceof Error ? err.message : String(err),
+                  },
+                  'market-sync: auto-void failed (will retry next run)',
+                );
+              }
+            }
+            continue;
+          }
+
+          // Stale guard (STALE_GRACE_MS–STUCK_VOID_MS window): kickoff well past
+          // but the source still isn't final → the upstream is likely frozen.
+          // Nudge a re-ingest (throttled per market).
           if (kickoff && Date.now() - kickoff > STALE_GRACE_MS) {
             const last = lastRefresh.get(row.marketObjectId) ?? 0;
             if (Date.now() - last > REFRESH_THROTTLE_MS) {
