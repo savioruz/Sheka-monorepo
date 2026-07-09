@@ -196,6 +196,41 @@ export function teamSearchTerms(displayName: string | null | undefined): string[
   return [...new Set(tokens)];
 }
 
+// Bracket-placeholder detection. FIFA / World-Cup schedules seed knockout slots
+// with placeholder "teams" (e.g. "Group J Winner" vs "Group H 2nd Place",
+// "Semifinal 1 Loser") long before the real fixture exists. ESPN never marks the
+// placeholder event `status='final'` (the real match uses a different espn_id),
+// so a market on one hangs in "Awaiting result" forever. Match ONLY unambiguous
+// bracket phrasings (word-boundary, case-insensitive) so real club / national
+// team names never trip the filter.
+const PLACEHOLDER_PATTERNS: RegExp[] = [
+  /\bwinner\b/i,
+  /\bloser\b/i,
+  /\brunner[-\s]?up\b/i,
+  /\b\d+(?:st|nd|rd|th)\s+place\b/i, // "2nd Place", "3rd place"
+  /\bto be determined\b/i,
+  /\btbd\b/i,
+  /\bquarterfinals?\b/i,
+  /\bsemifinals?\b/i,
+  /\bplayoffs?\b/i,
+  /\bround of \d+\b/i, // "Round of 16"
+  /\bgroup [a-z0-9]\b/i, // "Group A", "Group J Winner"
+];
+
+/** True when a single competitor name is a bracket placeholder, not a real team. */
+export function isPlaceholderName(name: string | null | undefined): boolean {
+  if (typeof name !== 'string') return false;
+  return PLACEHOLDER_PATTERNS.some((re) => re.test(name));
+}
+
+/**
+ * True when EITHER competitor is a bracket placeholder (e.g. "Group J Winner"
+ * vs "Group H 2nd Place"). Used to skip creating markets that can never resolve.
+ */
+export function isPlaceholder(homeName: string, awayName: string): boolean {
+  return isPlaceholderName(homeName) || isPlaceholderName(awayName);
+}
+
 export function createIngestor(deps: IngestorDeps) {
   const { config, db, logger } = deps;
   const baseUrl = config.espn.baseUrl.replace(/\/$/, '');
@@ -560,6 +595,19 @@ export function createIngestor(deps: IngestorDeps) {
 
     return games.filter((game) => {
       if (game.status === 'postponed' || game.status === 'cancelled') return false;
+
+      // Never create markets for bracket placeholders — they never reach 'final'.
+      if (isPlaceholder(game.homeTeam.displayName, game.awayTeam.displayName)) {
+        logger.debug(
+          {
+            eventId: game.eventId,
+            home: game.homeTeam.displayName,
+            away: game.awayTeam.displayName,
+          },
+          'ingestor: skipping bracket-placeholder game',
+        );
+        return false;
+      }
 
       if (game.status === 'scheduled') {
         const start = new Date(game.scheduledAt);

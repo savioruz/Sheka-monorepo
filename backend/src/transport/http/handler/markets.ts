@@ -1,5 +1,7 @@
+import type { Config } from '@config/config';
 import type { AnalysisJobs } from '@domains/analysis/jobs';
 import type { AnalysisService } from '@domains/analysis/service';
+import { voidMarketByPools } from '@domains/market/market-sync';
 import type { MarketService } from '@domains/market/service';
 import type { Analyst } from '@domains/prediction/analyst';
 import type { Ingestor } from '@domains/prediction/ingestor';
@@ -16,6 +18,7 @@ import { error, success } from '../response';
 const OUTCOME_LABEL = ['Home', 'Draw', 'Away'];
 
 export interface MarketsDeps {
+  config: Config;
   marketService: MarketService;
   ingestor: Ingestor;
   analyst: Analyst;
@@ -24,7 +27,7 @@ export interface MarketsDeps {
 }
 
 export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
-  const { marketService, ingestor, analyst, analysisService, analysisJobs } = deps;
+  const { config, marketService, ingestor, analyst, analysisService, analysisJobs } = deps;
 
   const analyzeSchema = z.object({
     model_id: z.number().int().min(0),
@@ -394,6 +397,73 @@ export function registerMarketsRoutes(app: Hono, deps: MarketsDeps) {
       );
     } catch (err) {
       return c.json(error('resolve_failed', err instanceof Error ? err.message : String(err)), 502);
+    }
+  });
+
+  // Operator: terminally clear a market that ESPN never marked final (e.g. a FIFA
+  // bracket placeholder stuck in "Awaiting result"). Reads the on-chain per-outcome
+  // pools and resolves to a void/empty outcome so `claim` refunds every staker.
+  // Same open posture as resolve-auto above: no HTTP auth middleware — the on-chain
+  // authority is the server's AdminCap keypair (resolveMarket only succeeds because
+  // the server signs as admin), and this action can only ever refund, never pay out
+  // a caller-chosen winner.
+  app.post('/api/markets/:id/void', async (c) => {
+    const marketObjectId = c.req.param('id');
+    const row = await marketService.getMarketRow(marketObjectId);
+    if (!row) return c.json(error('not_found', 'Market not found'), 404);
+
+    // This endpoint has no HTTP auth (same posture as resolve-auto), so it must be
+    // safe-by-construction: only void a GENUINELY-STUCK market — open, no final
+    // result, and well past the stuck threshold. Otherwise anyone could refund/cancel
+    // a healthy live market. Mirrors the auto-void guard in resolveFinishedMarkets.
+    if (row.status === 'resolved') {
+      return c.json(error('already_resolved', 'Market already resolved'), 409);
+    }
+    const game = await ingestor
+      .fetchGameContext(row.eventId, row.sport as Sport, row.league)
+      .catch(() => null);
+    if (game?.status === 'final') {
+      return c.json(
+        error('has_final_result', 'Market has a final result; resolve it normally'),
+        409,
+      );
+    }
+    const kickoff = row.scheduledAt?.getTime() ?? null;
+    const stuckMs = config.market.stuckVoidHours * 60 * 60 * 1000;
+    if (!kickoff || Date.now() - kickoff <= stuckMs) {
+      return c.json(
+        error(
+          'not_stuck',
+          `Market is not terminally stuck (needs >${config.market.stuckVoidHours}h past kickoff and no final result)`,
+        ),
+        409,
+      );
+    }
+
+    try {
+      const result = await traced('markets.void.byPools', () =>
+        voidMarketByPools(marketService, marketObjectId),
+      );
+      if (result.status === 'no_state') {
+        return c.json(error('no_state', 'Could not read on-chain market pools'), 502);
+      }
+      if (result.status === 'cannot') {
+        return c.json(
+          error('cannot_void', 'Market has stakes on every outcome — cannot void backend-only'),
+          422,
+        );
+      }
+      await marketService.markVoided(marketObjectId, result.winner ?? 1, result.digest as string);
+      return c.json(
+        success({
+          market_object_id: marketObjectId,
+          winner: result.winner,
+          mode: result.status, // 'voided' (no stake) | 'refunded' (empty outcome refunds all)
+          tx_digest: result.digest,
+        }),
+      );
+    } catch (err) {
+      return c.json(error('void_failed', err instanceof Error ? err.message : String(err)), 502);
     }
   });
 

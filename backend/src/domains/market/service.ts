@@ -146,6 +146,15 @@ export function createMarketService(deps: MarketServiceDeps) {
     return repo.markResolved(marketObjectId, winner, resolveTxDigest);
   }
 
+  /** Mirror a terminal auto/manual void to the local cache (status='resolved'). */
+  function markVoided(
+    marketObjectId: string,
+    winner: number,
+    resolveTxDigest: string,
+  ): Promise<void> {
+    return repo.markVoided(marketObjectId, winner, resolveTxDigest);
+  }
+
   return {
     createMarket,
     resolveMarket,
@@ -153,6 +162,7 @@ export function createMarketService(deps: MarketServiceDeps) {
     getMarketRow,
     listMarketRows,
     markResolved,
+    markVoided,
   };
 }
 

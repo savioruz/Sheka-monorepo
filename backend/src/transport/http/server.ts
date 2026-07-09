@@ -99,6 +99,7 @@ export function createServer(deps: ServerDeps): Hono {
 
   registerAnalysisRoutes(app, { config, analysisService, analysisJobs });
   registerMarketsRoutes(app, {
+    config,
     marketService,
     ingestor,
     analyst,

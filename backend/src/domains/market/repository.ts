@@ -40,6 +40,24 @@ export function createMarketRepository(deps: MarketRepositoryDeps) {
         .set({ status: 'resolved', winner, resolveTxDigest, updatedAt: new Date() })
         .where(eq(markets.marketObjectId, marketObjectId));
     },
+
+    /** Mark a market terminally voided (auto/manual) — resolved with a reason. */
+    async markVoided(
+      marketObjectId: string,
+      winner: number,
+      resolveTxDigest: string,
+    ): Promise<void> {
+      await db
+        .update(markets)
+        .set({
+          status: 'resolved',
+          winner,
+          resolveTxDigest,
+          resolvedReason: 'auto_void',
+          updatedAt: new Date(),
+        })
+        .where(eq(markets.marketObjectId, marketObjectId));
+    },
   };
 }
 
